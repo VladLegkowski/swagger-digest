@@ -1,0 +1,2 @@
+npm run check:exports
+npx lint-staged

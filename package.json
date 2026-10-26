@@ -1,0 +1,84 @@
+{
+  "name": "swagger-digest",
+  "version": "0.1.1",
+  "description": "Turn Swagger UI pages and OpenAPI specs into compact, AI-friendly Markdown API digests.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "swagger-digest": "./dist/cli.js"
+  },
+  "author": "VladLegkowski <VladLegkowski@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VladLegkowski/swagger-digest.git"
+  },
+  "homepage": "https://github.com/VladLegkowski/swagger-digest#readme",
+  "bugs": {
+    "url": "https://github.com/VladLegkowski/swagger-digest/issues"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && tsx --test test/*.test.ts",
+    "check:exports": "publint",
+    "lint": "eslint .",
+    "prepare": "husky",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.3.2",
+    "chalk": "^5.4.1",
+    "cheerio": "^1.0.0",
+    "commander": "^13.1.0",
+    "ora": "^8.2.0",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "eslint": "^9.27.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "prettier": "^3.9.10",
+    "publint": "^0.3.25",
+    "tsup": "^9.0.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.32.0"
+  },
+  "peerDependencies": {
+    "playwright": "^1.50.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "openapi",
+    "swagger",
+    "markdown",
+    "llm",
+    "ai-coding-agent",
+    "cli"
+  ],
+  "license": "MIT"
+}
