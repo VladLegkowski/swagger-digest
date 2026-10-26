@@ -326,10 +326,15 @@ test('collapses standard error responses and suppresses synthetic error examples
               content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
             },
             '401': { description: 'Unauthorized' },
+            '403': {
+              description: 'Forbidden',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+            },
             '404': {
               description: 'Not found',
               content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
             },
+            '502': { description: 'Bad gateway' },
             '409': {
               description: 'Conflict: version mismatch',
               content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -341,7 +346,7 @@ test('collapses standard error responses and suppresses synthetic error examples
   };
   const markdown = transformOpenApiToMarkdown(spec);
   // Standard errors with generic descriptions collapse into a single line regardless of schema identity
-  assert.match(markdown, /- \*\*Errors:\*\* `400` \(`Error`\), `401`, `404` \(`Error`\)/);
+  assert.match(markdown, /- \*\*Errors:\*\* `400` \(`Error`\), `401`, `403` \(`Error`\), `404` \(`Error`\), `502`/);
   // Custom description with a non-standard code keeps its detailed block
   assert.match(markdown, /\*\*409 Conflict: version mismatch\*\* — `Error`/);
   // Synthetic (schema-derived) example JSON is suppressed for error responses

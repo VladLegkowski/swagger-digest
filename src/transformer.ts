@@ -808,17 +808,25 @@ const COLLAPSIBLE_ERROR_CODES = new Set(['400', '401', '403', '404', '500', '502
 const GENERIC_ERROR_DESCRIPTIONS = new Set([
   '',
   'an error occurred',
+  'bad gateway',
   'bad request',
   'client error',
   'error',
+  'failed',
+  'forbidden',
+  'internal error',
   'internal server error',
   'invalid request',
   'not found',
+  'payment required',
   'request error',
+  'request failed',
   'server error',
+  'service unavailable',
   'too many requests',
   'unauthorized',
   'unexpected error',
+  'unknown error',
 ]);
 
 function isGenericErrorDescription(description: string): boolean {
