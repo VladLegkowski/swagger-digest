@@ -8,7 +8,7 @@
 npx swagger-digest
 ```
 
-The CLI asks for a URL, a destination directory (Desktop by default), and an output filename such as `payments-api-digest.md`.
+The CLI asks for a URL, a destination directory (Downloads by default), and an output filename such as `payments-api-digest.md`.
 
 You can also provide arguments:
 

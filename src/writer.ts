@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 export function defaultOutputDirectory(): string {
-  return path.join(os.homedir(), 'Desktop');
+  return path.join(os.homedir(), 'Downloads');
 }
 
 export function defaultFilename(apiTitle?: string): string {
