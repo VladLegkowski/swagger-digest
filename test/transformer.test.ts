@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
+import os from 'node:os';
+import path from 'node:path';
+import { access, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { fetchOpenApiSpec, parseSpecText } from '../src/fetcher.js';
 import { transformOpenApiToMarkdown } from '../src/transformer.js';
-import { defaultFilename, normalizeFilename, resolveOutputDirectory } from '../src/writer.js';
+import { defaultFilename, normalizeFilename, resolveOutputDirectory, writeDigest } from '../src/writer.js';
 
 const sampleSpec = {
   openapi: '3.0.3',
@@ -359,11 +362,292 @@ test('collapses standard error responses and suppresses synthetic error examples
   assert.doesNotMatch(markdown, /\| In \| Name \|/);
 });
 
+test('renders allOf, oneOf and anyOf compositions as TypeScript unions and intersections', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'Compositions', version: '1.0.0' },
+    components: {
+      schemas: {
+        Cat: { type: 'object', required: ['meow'], properties: { meow: { type: 'string' } } },
+        Dog: { type: 'object', required: ['bark'], properties: { bark: { type: 'string' } } },
+        CatDog: { allOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }] },
+        Pet: { oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }] },
+        Contact: { anyOf: [{ type: 'string' }, { type: 'object', properties: { email: { type: 'string' } } }] },
+      },
+    },
+    paths: {
+      '/pets': {
+        get: {
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      combined: { $ref: '#/components/schemas/CatDog' },
+                      either: { $ref: '#/components/schemas/Pet' },
+                      contact: { $ref: '#/components/schemas/Contact' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /export type CatDog = Cat & Dog;/);
+  assert.match(markdown, /export type Pet = Cat \| Dog;/);
+  assert.match(markdown, /export type Contact = string \| \{ email\?: string; \}/);
+  assert.match(markdown, /combined\?: CatDog;/);
+});
+
+test('renders OpenAPI 3.0 nullable as a null union', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'Nullable', version: '1.0.0' },
+    components: {
+      schemas: {
+        Thing: {
+          type: 'object',
+          properties: {
+            nickname: { type: 'string', nullable: true },
+            score: { type: 'number', nullable: true, description: 'nullable number' },
+          },
+        },
+      },
+    },
+    paths: {
+      '/things': {
+        get: {
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Thing' } } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /nickname\?: string \| null;/);
+  assert.match(markdown, /score\?: number \| null;/);
+});
+
+test('renders OpenAPI 3.1 type arrays as null unions', () => {
+  const spec = {
+    openapi: '3.1.0',
+    info: { title: 'Type Arrays', version: '1.0.0' },
+    components: {
+      schemas: {
+        Node: {
+          type: 'object',
+          properties: {
+            value: { type: ['string', 'null'] },
+            mixed: { type: ['number', 'string'] },
+          },
+        },
+      },
+    },
+    paths: {
+      '/nodes': {
+        get: {
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Node' } } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /value\?: string \| null;/);
+  assert.match(markdown, /mixed\?: number;/);
+});
+
+test('renders enums as string literal unions and additionalProperties as index signatures', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'Enums and maps', version: '1.0.0' },
+    components: {
+      schemas: {
+        Color: { type: 'string', enum: ['red', 'green', 'blue'], description: 'Primary colors' },
+        NumericEnum: { type: 'integer', enum: [1, 2, 3] },
+        Labeled: { type: 'string', enum: ['a', 'b'] },
+        StringMap: { type: 'object', additionalProperties: { type: 'integer' } },
+        FreeForm: { type: 'object', additionalProperties: true },
+        Wrapper: {
+          type: 'object',
+          properties: {
+            color: { $ref: '#/components/schemas/Color' },
+            count: { $ref: '#/components/schemas/NumericEnum' },
+            labels: { type: 'array', items: { $ref: '#/components/schemas/Labeled' } },
+            attrs: { $ref: '#/components/schemas/StringMap' },
+            extras: { $ref: '#/components/schemas/FreeForm' },
+          },
+        },
+      },
+    },
+    paths: {
+      '/wrapper': {
+        get: {
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Wrapper' } } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /export type Color = "red" \| "green" \| "blue";/);
+  assert.match(markdown, /export type NumericEnum = 1 \| 2 \| 3;/);
+  assert.match(markdown, /interface StringMap \{[^]*\[key: string\]: number;/);
+  assert.match(markdown, /interface FreeForm \{[^]*\[key: string\]: unknown;/);
+  assert.match(markdown, /color\?: Color;/);
+  assert.match(markdown, /count\?: NumericEnum;/);
+  assert.match(markdown, /labels\?: Labeled\[\];/);
+});
+
+test('handles circular $refs without hanging or throwing', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'Circular', version: '1.0.0' },
+    components: {
+      schemas: {
+        Node: {
+          type: 'object',
+          required: ['id'],
+          properties: {
+            id: { type: 'string' },
+            child: { $ref: '#/components/schemas/Node' },
+            parent: { $ref: '#/components/schemas/Node' },
+          },
+        },
+        Tree: {
+          type: 'object',
+          properties: {
+            root: { $ref: '#/components/schemas/Node' },
+            nodes: { type: 'array', items: { $ref: '#/components/schemas/Node' } },
+          },
+        },
+      },
+    },
+    paths: {
+      '/trees/{id}': {
+        get: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Tree' } } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /export interface Tree/);
+  assert.match(markdown, /child\?: Node;/);
+  assert.match(markdown, /parent\?: Node;/);
+  assert.match(markdown, /export interface Node/);
+});
+
+test('degrades unresolved external $refs to named references without throwing', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'External refs', version: '1.0.0' },
+    paths: {
+      '/widgets': {
+        get: {
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      meta: { $ref: 'https://schemas.example.org/meta.json' },
+                      local: { $ref: '#/components/schemas/Widget' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: {
+        Widget: { type: 'object', properties: { name: { type: 'string' } } },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  assert.match(markdown, /interface Widget/);
+  // External refs degrade to a named identifier, never throw and never emit the raw URL type
+  assert.doesNotMatch(markdown, /schemas\.example\.org/);
+  assert.match(markdown, /meta\?: meta_json;/);
+});
+
 test('normalizes output filenames and directories', () => {
   assert.equal(defaultFilename('Payments API'), 'payments-api-digest.md');
   assert.equal(normalizeFilename('report'), 'report.md');
   assert.equal(normalizeFilename('../report.MD'), 'report.MD');
   assert.equal(resolveOutputDirectory('./docs', '/tmp/project'), '/tmp/project/docs');
+});
+
+test('writeDigest blocks path traversal in filenames', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'swagger-digest-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const outputPath = await writeDigest({ markdown: '# hi', directory, filename: '../../escaped.md' });
+  const realDirectory = await realpath(directory);
+  const realOutput = await realpath(outputPath);
+  assert.ok(realOutput.startsWith(realDirectory + path.sep), `output escaped directory: ${outputPath}`);
+  assert.equal(path.basename(outputPath), 'escaped.md');
+  await access(outputPath); // throws if the file was not written inside the directory
+});
+
+test('writeDigest expands ~ in the output directory', async (t) => {
+  const fakeHome = await mkdtemp(path.join(os.tmpdir(), 'swagger-digest-home-'));
+  t.after(() => rm(fakeHome, { recursive: true, force: true }));
+
+  assert.equal(resolveOutputDirectory('~', '/tmp/project'), os.homedir());
+  const expanded = resolveOutputDirectory(path.join('~', 'docs'), '/tmp/project');
+  assert.equal(expanded, path.join(os.homedir(), 'docs'));
+
+  // End-to-end: a ~ directory resolves inside the (stubbed) home directory.
+  const originalHome = os.homedir;
+  os.homedir = () => fakeHome;
+  try {
+    const outputPath = await writeDigest({ markdown: '# hi', directory: '~/digests', filename: 'report.md' });
+    assert.ok(outputPath.startsWith(fakeHome + path.sep), `output not under home: ${outputPath}`);
+    await access(outputPath);
+  } finally {
+    os.homedir = originalHome;
+  }
+});
+
+test('writeDigest appends a missing .md extension', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'swagger-digest-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+
+  const outputPath = await writeDigest({ markdown: '# hi', directory, filename: 'digest' });
+  assert.equal(path.basename(outputPath), 'digest.md');
+  await access(outputPath);
 });
 
 test('discovers spec URLs in an external swagger-initializer.js under a context path', async (t) => {

@@ -17,26 +17,43 @@ export interface DigestTokenReport {
 }
 
 /**
- * Estimates token counts for Markdown/code across 5 frontier model tokenizers.
- * Accurately models differences between cl100k/o200k, Claude BPE, SentencePiece 256k, and 128k BPE.
+ * Single source of truth for the model table shown in the digest summary.
+ *
+ * NOTE: these model names, context windows and ratios are a snapshot taken in
+ * October 2026 and need periodic review as frontier models change. The ratios
+ * are invented multipliers on one heuristic — they express a rough ordering
+ * between tokenizer families, NOT measured tokenizer output.
+ */
+const MODEL_CONFIGS = {
+  claude: { name: 'Claude (Sonnet / Opus)', contextWindow: 200_000, ratio: 1.08 },
+  openai: { name: 'OpenAI (GPT-4o / o-series)', contextWindow: 128_000, ratio: 0.95 },
+  gemini: { name: 'Google Gemini (Pro / Flash)', contextWindow: 1_000_000, ratio: 0.9 },
+  deepseek: { name: 'DeepSeek (V3 / R1)', contextWindow: 128_000, ratio: 0.97 },
+  llama: { name: 'Meta Llama (3.3 / 4)', contextWindow: 128_000, ratio: 0.98 },
+} as const satisfies Record<string, { name: string; contextWindow: number; ratio: number }>;
+
+/**
+ * Produces ROUGH token-count estimates for Markdown/code. The numbers are a
+ * heuristic (word + symbol density with per-model multipliers), not accurate
+ * tokenizer counts — use them as an order-of-magnitude guide only.
  */
 export function estimateTokens(text: string): DigestTokenReport {
   const characters = text.length;
   if (characters === 0) {
-    const zeroModel = (name: string, window: number): ModelTokenEstimate => ({
+    const zeroModel = ({ name, contextWindow }: { name: string; contextWindow: number }): ModelTokenEstimate => ({
       name,
       tokens: 0,
-      contextWindow: window,
+      contextWindow,
       contextPercent: 0,
     });
     return {
       characters: 0,
       models: {
-        claude: zeroModel('Claude (Sonnet / Opus)', 200_000),
-        openai: zeroModel('OpenAI (GPT-4o / o-series)', 128_000),
-        gemini: zeroModel('Google Gemini (Pro / Flash)', 1_000_000),
-        deepseek: zeroModel('DeepSeek (V3 / R1)', 128_000),
-        llama: zeroModel('Meta Llama (3.3 / 4)', 128_000),
+        claude: zeroModel(MODEL_CONFIGS.claude),
+        openai: zeroModel(MODEL_CONFIGS.openai),
+        gemini: zeroModel(MODEL_CONFIGS.gemini),
+        deepseek: zeroModel(MODEL_CONFIGS.deepseek),
+        llama: zeroModel(MODEL_CONFIGS.llama),
       },
     };
   }
@@ -59,16 +76,15 @@ export function estimateTokens(text: string): DigestTokenReport {
   return {
     characters,
     models: {
-      // Claude BPE splits subwords and code tokens slightly finer
-      claude: calculate('Claude (Sonnet / Opus)', 1.08, 200_000),
-      // OpenAI o200k_base has efficient compression on whitespace and symbols
-      openai: calculate('OpenAI (GPT-4o / o-series)', 0.95, 128_000),
-      // Gemini 256k vocab is the most compressed on markdown & code
-      gemini: calculate('Google Gemini (Pro / Flash)', 0.9, 1_000_000),
-      // DeepSeek 128k tokenizer
-      deepseek: calculate('DeepSeek (V3 / R1)', 0.97, 128_000),
-      // Llama 3/4 128k tokenizer
-      llama: calculate('Meta Llama (3.3 / 4)', 0.98, 128_000),
+      claude: calculate(MODEL_CONFIGS.claude.name, MODEL_CONFIGS.claude.ratio, MODEL_CONFIGS.claude.contextWindow),
+      openai: calculate(MODEL_CONFIGS.openai.name, MODEL_CONFIGS.openai.ratio, MODEL_CONFIGS.openai.contextWindow),
+      gemini: calculate(MODEL_CONFIGS.gemini.name, MODEL_CONFIGS.gemini.ratio, MODEL_CONFIGS.gemini.contextWindow),
+      deepseek: calculate(
+        MODEL_CONFIGS.deepseek.name,
+        MODEL_CONFIGS.deepseek.ratio,
+        MODEL_CONFIGS.deepseek.contextWindow,
+      ),
+      llama: calculate(MODEL_CONFIGS.llama.name, MODEL_CONFIGS.llama.ratio, MODEL_CONFIGS.llama.contextWindow),
     },
   };
 }
