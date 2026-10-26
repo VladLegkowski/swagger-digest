@@ -83,8 +83,8 @@ test('creates a compact endpoint index, parameters, auth and schema interfaces',
   assert.match(markdown, /# API Digest: Example Payments API/);
   assert.match(markdown, /\| \*\*GET\*\* \| `\/payments\/\{paymentId\}` \| Get a payment \| Payments \|/);
   assert.match(markdown, /\*\*Authentication:\*\* bearerAuth/);
-  assert.match(markdown, /`paymentId` \| `string` \| Yes/);
-  assert.match(markdown, /`expand` \| `boolean` \| No/);
+  assert.match(markdown, /- `paymentId` \(`path`, required\) · `string`/);
+  assert.match(markdown, /- `expand` \(`query`\) · `boolean`/);
   assert.match(markdown, /`application\/json` → `CreatePaymentDto` \(required\)/);
   assert.match(markdown, /\*\*404 Payment not found\*\* — `Error`/);
   assert.match(markdown, /interface CreatePaymentDto/);
@@ -294,6 +294,63 @@ test('supports Swagger 2.0 host/basePath and body parameters', () => {
   assert.match(markdown, /\*\*201 Created\*\* — `PostItems201Response`/);
   assert.match(markdown, /interface PostItemsRequest/);
   assert.match(markdown, /interface PostItems201Response/);
+});
+
+test('collapses standard error responses and suppresses synthetic error examples', () => {
+  const spec = {
+    openapi: '3.0.3',
+    info: { title: 'Error Collapse', version: '1.0.0' },
+    components: {
+      schemas: { Error: { type: 'object', properties: { message: { type: 'string' } } } },
+    },
+    paths: {
+      '/things/{id}': {
+        get: {
+          summary: 'Get a thing',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: { $ref: '#/components/schemas/Error' },
+                  example: { message: 'all good' },
+                },
+              },
+            },
+            '400': {
+              description: 'Bad request',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+            },
+            '401': { description: 'Unauthorized' },
+            '404': {
+              description: 'Not found',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+            },
+            '409': {
+              description: 'Conflict: version mismatch',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+            },
+          },
+        },
+      },
+    },
+  };
+  const markdown = transformOpenApiToMarkdown(spec);
+  // Standard errors with generic descriptions and a shared payload collapse into one line
+  assert.match(markdown, /- \*\*Errors:\*\* `400`, `404` → `Error`/);
+  // 401 is a singleton with no schema and a generic description → keeps its own compact line
+  assert.match(markdown, /\*\*401 Unauthorized\*\* — no body schema declared/);
+  // Custom description with a non-standard code keeps its detailed block
+  assert.match(markdown, /\*\*409 Conflict: version mismatch\*\* — `Error`/);
+  // Synthetic (schema-derived) example JSON is suppressed for error responses
+  assert.doesNotMatch(markdown, /\*\*400[^']*Example Value/);
+  assert.doesNotMatch(markdown, /"message": "string"/);
+  // Success example still renders
+  assert.match(markdown, /"message": "all good"/);
+  // Parameter list format with compact uuid type display
+  assert.match(markdown, /- `id` \(`path`, required\) · `string \(uuid\)`/);
+  assert.doesNotMatch(markdown, /\| In \| Name \|/);
 });
 
 test('normalizes output filenames and directories', () => {

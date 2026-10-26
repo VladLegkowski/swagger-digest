@@ -86,10 +86,12 @@ function schemaMetadata(schemaValue: unknown): string[] {
     ['multipleOf', 'multipleOf'],
   ];
   for (const [property, label] of constraints) {
-    if (schema[property] !== undefined)
-      metadata.push(
-        `${label}: ${typeof schema[property] === 'string' ? schema[property] : JSON.stringify(schema[property])}`,
-      );
+    const value = schema[property];
+    if (value === undefined) continue;
+    if (property === 'default' && (value === null || value === '')) continue;
+    metadata.push(
+      `${label}: ${property === 'default' ? JSON.stringify(value) : typeof value === 'string' ? value : JSON.stringify(value)}`,
+    );
   }
   if (schema.readOnly === true) metadata.push('read-only');
   if (schema.writeOnly === true) metadata.push('write-only');
@@ -276,7 +278,7 @@ function typeExpression(schemaValue: unknown, depth = 0): string {
   switch (type) {
     case 'string':
     case 'file':
-      base = cleanText(schema.format) ? `string /* format: ${safeComment(schema.format)} */` : 'string';
+      base = cleanText(schema.format) ? `string /* ${safeComment(schema.format)} */` : 'string';
       break;
     case 'integer':
     case 'number':
@@ -488,13 +490,6 @@ function securityRequirement(spec: JsonObject, operation: JsonObject): string {
     .join(' OR ');
 }
 
-function parameterType(parameter: JsonObject): string {
-  if (isObject(parameter.schema)) return typeExpression(parameter.schema);
-  if (parameter.type === 'array') return `${typeExpression(parameter.items)}[]`;
-  if (parameter.type) return typeExpression({ type: parameter.type, format: parameter.format, enum: parameter.enum });
-  return 'unknown';
-}
-
 function mergedParameters(spec: JsonObject, endpoint: Endpoint): JsonObject[] {
   const operationParameters = Array.isArray(endpoint.operation.parameters)
     ? endpoint.operation.parameters.map((parameter: unknown) => resolveReferenceObject(spec, parameter))
@@ -508,17 +503,43 @@ function mergedParameters(spec: JsonObject, endpoint: Endpoint): JsonObject[] {
   return [...byIdentity.values()];
 }
 
-function parameterTable(parameters: JsonObject[]): string {
+function parameterType(parameter: JsonObject): string {
+  if (isObject(parameter.schema)) return typeExpression(parameter.schema);
+  if (parameter.type === 'array') return `${typeExpression(parameter.items)}[]`;
+  if (parameter.type) return typeExpression({ type: parameter.type, format: parameter.format, enum: parameter.enum });
+  return 'unknown';
+}
+
+function parameterDisplayType(parameter: JsonObject): string {
+  // `string /* uuid */` → `string (uuid)` for compact list rendering
+  return parameterType(parameter).replace(/\/\*\s*([^*]+?)\s*\*\//g, '($1)');
+}
+
+function parameterDefault(parameter: JsonObject): unknown {
+  if (parameter.default !== undefined) return parameter.default;
+  if (isObject(parameter.schema)) return parameter.schema.default;
+  return undefined;
+}
+
+function isMeaningfulDefault(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function parameterList(parameters: JsonObject[]): string {
   if (!parameters.length) return '_None._';
-  const rows = parameters.map((parameter) => {
-    const required = parameter.required === true || parameter.in === 'path';
-    const descriptionParts = [cleanText(parameter.description)];
-    if (Array.isArray(parameter.enum) && parameter.enum.length)
-      descriptionParts.push(`enum: ${parameter.enum.map(String).join(', ')}`);
-    if (parameter.default !== undefined) descriptionParts.push(`default: ${String(parameter.default)}`);
-    return `| ${markdownCell(parameter.in)} | \`${markdownCell(parameter.name)}\` | \`${markdownCell(parameterType(parameter))}\` | ${required ? 'Yes' : 'No'} | ${markdownCell(descriptionParts.filter(Boolean).join('; '))} |`;
-  });
-  return ['| In | Name | Type | Required | Notes |', '|---|---|---|---|---|', ...rows].join('\n');
+  return parameters
+    .map((parameter) => {
+      const required = parameter.required === true || parameter.in === 'path';
+      const type = parameterDisplayType(parameter);
+      const defaultValue = parameterDefault(parameter);
+      const defaultSuffix = isMeaningfulDefault(defaultValue)
+        ? ` (default: ${typeof defaultValue === 'string' ? JSON.stringify(defaultValue) : String(defaultValue)})`
+        : '';
+      const description = cleanText(parameter.description);
+      const details = description ? ` — ${description}` : '';
+      return `- \`${cleanText(parameter.name)}\` (\`${cleanText(parameter.in)}\`${required ? ', required' : ''}) · \`${type}\`${defaultSuffix}${details}`;
+    })
+    .join('\n');
 }
 
 function chooseMediaType(content: JsonObject): string | undefined {
@@ -764,7 +785,10 @@ function responseBlock(spec: JsonObject, code: string, responseValue: unknown): 
     ? ` — \`${payload.type}\`${payload.mediaType ? ` (${payload.mediaType})` : ''}`
     : ' — no body schema declared';
   const lines = [`- **${markdownCell(code)}${description ? ` ${description}` : ''}**${suffix}`];
-  if (payload.example) {
+  // Synthetic (schema-derived) JSON mocks for error responses are pure noise for LLMs;
+  // keep them only for success codes or when the spec declares the example explicitly.
+  const suppressSyntheticExample = code === 'default' || /^[45]\d\d$/.test(code);
+  if (payload.example && (payload.example.origin === 'declared' || !suppressSyntheticExample)) {
     const origin =
       payload.example.origin === 'declared' ? 'declared in the spec' : 'generated from schema; illustrative only';
     const label = payload.example.name ? ` · ${payload.example.name}` : '';
@@ -782,24 +806,116 @@ function responseBlock(spec: JsonObject, code: string, responseValue: unknown): 
   return lines.join('\n');
 }
 
+const COLLAPSIBLE_ERROR_CODES = new Set(['400', '401', '403', '404', '500', '502', '503']);
+
+const GENERIC_ERROR_DESCRIPTIONS = new Set([
+  '',
+  'an error occurred',
+  'bad request',
+  'client error',
+  'error',
+  'internal server error',
+  'invalid request',
+  'not found',
+  'request error',
+  'server error',
+  'too many requests',
+  'unauthorized',
+  'unexpected error',
+]);
+
+function isGenericErrorDescription(description: string): boolean {
+  if (!description) return true;
+  return GENERIC_ERROR_DESCRIPTIONS.has(
+    description
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim(),
+  );
+}
+
+function responseSchemaValue(spec: JsonObject, responseValue: unknown): unknown | undefined {
+  const response = resolveReferenceObject(spec, responseValue);
+  if (isObject(response.content)) {
+    const mediaType = chooseMediaType(response.content);
+    const media = mediaType ? response.content[mediaType] : undefined;
+    return isObject(media?.schema) ? media.schema : undefined;
+  }
+  if (isObject(response.schema)) return response.schema;
+  return undefined;
+}
+
+/**
+ * Identify errors that are safe to collapse: standard status codes with a generic
+ * description, no custom headers, no spec-authored example, and a shared payload.
+ * Returns the structural key of the payload, or undefined when the response is
+ * distinctive enough to deserve its own detailed block.
+ */
+function errorGroupKey(spec: JsonObject, code: string, responseValue: unknown): string | undefined {
+  if (!COLLAPSIBLE_ERROR_CODES.has(code)) return undefined;
+  const response = resolveReferenceObject(spec, responseValue);
+  if (!isGenericErrorDescription(cleanText(response.description))) return undefined;
+  if (isObject(response.headers) && Object.keys(response.headers).length) return undefined;
+  if (responseSchema(spec, responseValue).example?.origin === 'declared') return undefined;
+  const schemaValue = responseSchemaValue(spec, responseValue);
+  if (schemaValue === undefined) return 'no-body';
+  const resolved = resolveReferenceObject(spec, schemaValue);
+  return Object.keys(resolved).length ? JSON.stringify(resolved) : 'no-body';
+}
+
+function collapsedErrorsLine(codes: string[], schemaValue: unknown): string {
+  const target = schemaValue === undefined ? 'no body schema declared' : `\`${typeExpression(schemaValue)}\``;
+  return `- **Errors:** ${codes.map((code) => `\`${code}\``).join(', ')} → ${target}`;
+}
+
 function responseSection(spec: JsonObject, operation: JsonObject): string {
   const responses = entries(operation.responses).filter(([, value]) => isObject(value));
   if (!responses.length) return '_No responses declared._';
 
   const success = responses.filter(([code]) => /^2\d\d$/.test(code));
   success.sort(([a], [b]) => (a === '200' ? -1 : b === '200' ? 1 : Number(a) - Number(b)));
-  const errors = responses.filter(([code]) => COMMON_ERROR_CODES.has(code) || /^([45])\d\d$/.test(code));
-  const selected = [
-    ...success.slice(0, 1),
-    ...errors.filter(([code]) => !success.some(([successCode]) => successCode === code)),
-  ];
-  const lines = selected.map(([code, response]) => responseBlock(spec, code, response));
+  const errors = responses.filter(
+    ([code]) =>
+      (COMMON_ERROR_CODES.has(code) || /^([45])\d\d$/.test(code)) &&
+      !success.some(([successCode]) => successCode === code),
+  );
+
+  const errorItems = errors.map(([code, responseValue]) => ({
+    code,
+    responseValue,
+    key: errorGroupKey(spec, code, responseValue),
+  }));
+  const groupCounts = new Map<string, number>();
+  for (const item of errorItems) {
+    if (item.key === undefined) continue;
+    groupCounts.set(item.key, (groupCounts.get(item.key) ?? 0) + 1);
+  }
+
+  const collapsedCodes = new Map<string, string[]>();
+  const collapsedSchemas = new Map<string, unknown>();
+  const primarySuccess = success[0];
+  const lines: string[] = primarySuccess ? [responseBlock(spec, primarySuccess[0], primarySuccess[1])] : [];
+  for (const item of errorItems) {
+    if (item.key !== undefined && (groupCounts.get(item.key) ?? 0) >= 2) {
+      const codes = collapsedCodes.get(item.key) ?? [];
+      codes.push(item.code);
+      collapsedCodes.set(item.key, codes);
+      if (!collapsedSchemas.has(item.key))
+        collapsedSchemas.set(item.key, responseSchemaValue(spec, item.responseValue));
+      continue;
+    }
+    lines.push(responseBlock(spec, item.code, item.responseValue));
+  }
+  for (const [key, codes] of collapsedCodes) {
+    if (codes.length < 2) continue;
+    lines.push(collapsedErrorsLine(codes, collapsedSchemas.get(key)));
+  }
 
   if (success.length > 1) {
     const others = success.slice(1).map(([code, response]) => responseBlock(spec, code, response));
     lines.push('', '<details><summary>Other successful responses</summary>', '', ...others, '', '</details>');
   }
-  if (!selected.length) {
+  if (!lines.length) {
     return responses.map(([code, response]) => responseBlock(spec, code, response)).join('\n\n');
   }
   return lines.join('\n');
@@ -822,7 +938,7 @@ function endpointMarkdown(spec: JsonObject, endpoint: Endpoint): string {
   const parameters = mergedParameters(spec, endpoint);
   const request = requestPayloadDescription(spec, operation);
   lines.push('', '**Parameters**');
-  lines.push(parameterTable(parameters));
+  lines.push(parameterList(parameters));
   if (request) {
     lines.push(
       '',
