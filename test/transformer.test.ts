@@ -135,7 +135,7 @@ test('promotes inline OpenAPI 3 payloads to named interfaces and redacts sensiti
   assert.doesNotMatch(markdown, /\| body \|/);
 });
 
-test('includes complete schema-derived response Example Values for referenced paginated payloads', () => {
+test('suppresses synthetic response examples and keeps model interfaces instead', () => {
   const spec = {
     openapi: '3.0.3',
     info: { title: 'Monitoring API', version: '1.0.0' },
@@ -196,14 +196,17 @@ test('includes complete schema-derived response Example Values for referenced pa
   };
 
   const markdown = transformOpenApiToMarkdown(spec);
-  assert.match(markdown, /\*\*Example Value\*\* \*\(generated from schema; illustrative only\)\*/);
-  assert.match(markdown, /"items": \[/);
-  assert.match(markdown, /"name": "Acme Live TV"/);
-  assert.match(markdown, /"environment": "android"/);
-  assert.match(markdown, /"capturedAt": "2026-01-01T00:00:00Z"/);
-  assert.match(markdown, /"page": 1/);
-  assert.match(markdown, /"pageSize": 10/);
-  assert.match(markdown, /"totalItems": 42/);
+  // Synthetic (schema-derived) examples are never rendered — interfaces carry the structure
+  assert.doesNotMatch(markdown, /Example Value/);
+  assert.doesNotMatch(markdown, /"items": \[/);
+  assert.doesNotMatch(markdown, /"name": "Acme Live TV"/);
+  // The referenced models still render as TypeScript declarations in a single consolidated block
+  assert.match(markdown, /export interface GetEventAppMonitoringCollectionResponse/);
+  assert.match(markdown, /page\?: number;/);
+  assert.match(markdown, /pageSize\?: number;/);
+  assert.match(markdown, /totalItems\?: number;/);
+  // All models share one unified ```typescript fence
+  assert.equal((markdown.match(/```typescript/g) ?? []).length, 1);
 });
 
 test('preserves explicit response Example Value exactly as declared in the spec', () => {
@@ -337,10 +340,8 @@ test('collapses standard error responses and suppresses synthetic error examples
     },
   };
   const markdown = transformOpenApiToMarkdown(spec);
-  // Standard errors with generic descriptions and a shared payload collapse into one line
-  assert.match(markdown, /- \*\*Errors:\*\* `400`, `404` → `Error`/);
-  // 401 is a singleton with no schema and a generic description → keeps its own compact line
-  assert.match(markdown, /\*\*401 Unauthorized\*\* — no body schema declared/);
+  // Standard errors with generic descriptions collapse into a single line regardless of schema identity
+  assert.match(markdown, /- \*\*Errors:\*\* `400` \(`Error`\), `401`, `404` \(`Error`\)/);
   // Custom description with a non-standard code keeps its detailed block
   assert.match(markdown, /\*\*409 Conflict: version mismatch\*\* — `Error`/);
   // Synthetic (schema-derived) example JSON is suppressed for error responses

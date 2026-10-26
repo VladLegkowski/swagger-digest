@@ -363,9 +363,9 @@ function modelDeclaration(name: string, schema: JsonObject): string {
   const description = safeComment(schema.description);
   const comment = description ? `/** ${description} */\n` : '';
 
-  if (schema.$ref) return `${comment}type ${identifier} = ${typeExpression(schema)};`;
+  if (schema.$ref) return `${comment}export type ${identifier} = ${typeExpression(schema)};`;
   if (Array.isArray(schema.enum) || schema.const !== undefined || schema.oneOf || schema.anyOf || schema.allOf) {
-    return `${comment}type ${identifier} = ${typeExpression(schema)};`;
+    return `${comment}export type ${identifier} = ${typeExpression(schema)};`;
   }
   const kind = Array.isArray(schema.type) ? schema.type.find((item: unknown) => item !== 'null') : schema.type;
   if (kind === 'object' || schema.properties || schema.additionalProperties !== undefined) {
@@ -379,9 +379,9 @@ function modelDeclaration(name: string, schema: JsonObject): string {
     if (schema.additionalProperties === true) fields.push('    [key: string]: unknown;');
     else if (isObject(schema.additionalProperties))
       fields.push(`    [key: string]: ${typeExpression(schema.additionalProperties)};`);
-    return `${comment}interface ${identifier} {\n${fields.join('\n')}\n}`;
+    return `${comment}export interface ${identifier} {\n${fields.join('\n')}\n}`;
   }
-  return `${comment}type ${identifier} = ${typeExpression(schema)};`;
+  return `${comment}export type ${identifier} = ${typeExpression(schema)};`;
 }
 
 function resolvePointer(root: JsonObject, ref: string): unknown {
@@ -785,16 +785,13 @@ function responseBlock(spec: JsonObject, code: string, responseValue: unknown): 
     ? ` — \`${payload.type}\`${payload.mediaType ? ` (${payload.mediaType})` : ''}`
     : ' — no body schema declared';
   const lines = [`- **${markdownCell(code)}${description ? ` ${description}` : ''}**${suffix}`];
-  // Synthetic (schema-derived) JSON mocks for error responses are pure noise for LLMs;
-  // keep them only for success codes or when the spec declares the example explicitly.
-  const suppressSyntheticExample = code === 'default' || /^[45]\d\d$/.test(code);
-  if (payload.example && (payload.example.origin === 'declared' || !suppressSyntheticExample)) {
-    const origin =
-      payload.example.origin === 'declared' ? 'declared in the spec' : 'generated from schema; illustrative only';
+  // Only spec-declared examples are rendered; synthetic mocks duplicate the
+  // TypeScript interfaces in ## Data types and waste context window.
+  if (payload.example?.origin === 'declared') {
     const label = payload.example.name ? ` · ${payload.example.name}` : '';
     lines.push(
       '',
-      `  **Example Value** *(${origin}${label})*`,
+      `  **Example Value** *(declared in the spec${label})*`,
       '',
       '  ```json',
       ...formattedExample(payload.example.value)
@@ -846,26 +843,21 @@ function responseSchemaValue(spec: JsonObject, responseValue: unknown): unknown 
 }
 
 /**
- * Identify errors that are safe to collapse: standard status codes with a generic
- * description, no custom headers, no spec-authored example, and a shared payload.
- * Returns the structural key of the payload, or undefined when the response is
+ * Standard error codes with a generic description, no custom headers and no
+ * spec-authored example are boilerplate and collapse into one `Errors` line,
+ * regardless of whether their payload schemas are structurally identical.
+ * Returns the collapsed entry for this code, or undefined when the response is
  * distinctive enough to deserve its own detailed block.
  */
-function errorGroupKey(spec: JsonObject, code: string, responseValue: unknown): string | undefined {
+function collapsibleErrorEntry(spec: JsonObject, code: string, responseValue: unknown): string | undefined {
   if (!COLLAPSIBLE_ERROR_CODES.has(code)) return undefined;
   const response = resolveReferenceObject(spec, responseValue);
   if (!isGenericErrorDescription(cleanText(response.description))) return undefined;
   if (isObject(response.headers) && Object.keys(response.headers).length) return undefined;
   if (responseSchema(spec, responseValue).example?.origin === 'declared') return undefined;
   const schemaValue = responseSchemaValue(spec, responseValue);
-  if (schemaValue === undefined) return 'no-body';
-  const resolved = resolveReferenceObject(spec, schemaValue);
-  return Object.keys(resolved).length ? JSON.stringify(resolved) : 'no-body';
-}
-
-function collapsedErrorsLine(codes: string[], schemaValue: unknown): string {
-  const target = schemaValue === undefined ? 'no body schema declared' : `\`${typeExpression(schemaValue)}\``;
-  return `- **Errors:** ${codes.map((code) => `\`${code}\``).join(', ')} → ${target}`;
+  if (schemaValue === undefined) return `\`${code}\``;
+  return `\`${code}\` (\`${typeExpression(schemaValue)}\`)`;
 }
 
 function responseSection(spec: JsonObject, operation: JsonObject): string {
@@ -880,36 +872,18 @@ function responseSection(spec: JsonObject, operation: JsonObject): string {
       !success.some(([successCode]) => successCode === code),
   );
 
-  const errorItems = errors.map(([code, responseValue]) => ({
-    code,
-    responseValue,
-    key: errorGroupKey(spec, code, responseValue),
-  }));
-  const groupCounts = new Map<string, number>();
-  for (const item of errorItems) {
-    if (item.key === undefined) continue;
-    groupCounts.set(item.key, (groupCounts.get(item.key) ?? 0) + 1);
+  const detailedErrors: string[] = [];
+  const collapsedErrors: string[] = [];
+  for (const [code, responseValue] of errors) {
+    const entry = collapsibleErrorEntry(spec, code, responseValue);
+    if (entry === undefined) detailedErrors.push(responseBlock(spec, code, responseValue));
+    else collapsedErrors.push(entry);
   }
 
-  const collapsedCodes = new Map<string, string[]>();
-  const collapsedSchemas = new Map<string, unknown>();
   const primarySuccess = success[0];
   const lines: string[] = primarySuccess ? [responseBlock(spec, primarySuccess[0], primarySuccess[1])] : [];
-  for (const item of errorItems) {
-    if (item.key !== undefined && (groupCounts.get(item.key) ?? 0) >= 2) {
-      const codes = collapsedCodes.get(item.key) ?? [];
-      codes.push(item.code);
-      collapsedCodes.set(item.key, codes);
-      if (!collapsedSchemas.has(item.key))
-        collapsedSchemas.set(item.key, responseSchemaValue(spec, item.responseValue));
-      continue;
-    }
-    lines.push(responseBlock(spec, item.code, item.responseValue));
-  }
-  for (const [key, codes] of collapsedCodes) {
-    if (codes.length < 2) continue;
-    lines.push(collapsedErrorsLine(codes, collapsedSchemas.get(key)));
-  }
+  lines.push(...detailedErrors);
+  if (collapsedErrors.length) lines.push(`- **Errors:** ${collapsedErrors.join(', ')}`);
 
   if (success.length > 1) {
     const others = success.slice(1).map(([code, response]) => responseBlock(spec, code, response));
@@ -944,13 +918,13 @@ function endpointMarkdown(spec: JsonObject, endpoint: Endpoint): string {
       '',
       `**Request body:** \`${request.mediaType}\` → \`${request.type}\`${request.required ? ' (required)' : ' (optional)'}`,
     );
-    if (request.example) {
-      const origin =
-        request.example.origin === 'declared' ? 'declared in the spec' : 'generated from schema; illustrative only';
+    // Only spec-declared request examples are rendered; synthetic mocks
+    // duplicate the TypeScript interfaces in ## Data types.
+    if (request.example?.origin === 'declared') {
       const label = request.example.name ? ` · ${request.example.name}` : '';
       lines.push(
         '',
-        `**Request Example Value** *(${origin}${label})*`,
+        `**Request Example Value** *(declared in the spec${label})*`,
         '',
         '```json',
         formattedExample(request.example.value),
@@ -1123,8 +1097,10 @@ export function transformOpenApiToMarkdown(spec: JsonObject, sourceUrl?: string)
     ? [
         '## Data types',
         '',
-        ...models.map(([name, schema]) => `### ${name}\n\n\`\`\`typescript\n${modelDeclaration(name, schema)}\n\`\`\``),
-      ].join('\n\n')
+        '```typescript',
+        models.map(([name, schema]) => modelDeclaration(name, schema)).join('\n\n'),
+        '```',
+      ].join('\n')
     : '';
   const description = cleanText(info.description);
 
