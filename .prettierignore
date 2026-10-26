@@ -1,0 +1,3 @@
+# Generated fixtures must stay byte-for-byte identical to transformer output;
+# Prettier (via lint-staged) must never reformat them.
+test/fixtures/
