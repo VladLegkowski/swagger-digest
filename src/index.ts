@@ -1,5 +1,7 @@
 export { fetchOpenApiSpec, isOpenApiSpec, parseSpecText } from './fetcher.js';
 export { transformOpenApiToMarkdown, toTypeScriptIdentifier } from './transformer.js';
+export { estimateTokens } from './tokens.js';
+export type { DigestTokenReport, ModelTokenEstimate } from './tokens.js';
 export {
   defaultFilename,
   defaultOutputDirectory,

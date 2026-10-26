@@ -99,7 +99,7 @@ async function main(): Promise<void> {
     const outputPath = await writeDigest({ markdown, directory: outputDirectory, filename });
     writeSpinner.succeed(`Saved ${chalk.green(outputPath)}`);
 
-    const tokens = estimateTokens(markdown);
+    const report = estimateTokens(markdown);
     const endpointCount = Object.values(result.spec.paths ?? {}).reduce((count: number, pathItem: any) => {
       if (!pathItem || typeof pathItem !== 'object') return count;
       const methods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
@@ -113,11 +113,20 @@ async function main(): Promise<void> {
     if (modelCount > 0) {
       console.log(`  ${chalk.dim('•')} Data models:     ${chalk.cyan(modelCount)} schemas`);
     }
-    console.log(`  ${chalk.dim('•')} Characters:      ${chalk.dim(tokens.characters.toLocaleString())}`);
+    console.log(`  ${chalk.dim('•')} Characters:      ${chalk.dim(report.characters.toLocaleString())}`);
     console.log('');
-    console.log(chalk.bold('Estimated token counts:'));
-    console.log(`  ${chalk.dim('•')} Claude models:   ${chalk.yellow(`~${tokens.claude.toLocaleString()}`)} tokens`);
-    console.log(`  ${chalk.dim('•')} GPT-4 / 4o:      ${chalk.green(`~${tokens.gpt4.toLocaleString()}`)} tokens`);
+    console.log(chalk.bold('Estimated token usage (5 Frontier Models):'));
+
+    for (const model of Object.values(report.models)) {
+      const windowLabel =
+        model.contextWindow >= 1_000_000 ? `${model.contextWindow / 1_000_000}M` : `${model.contextWindow / 1_000}k`;
+
+      const paddedName = `${model.name}:`.padEnd(30, ' ');
+      const tokenStr = `~${model.tokens.toLocaleString()} tokens`.padEnd(16, ' ');
+      const percentStr = chalk.dim(`(${model.contextPercent}% of ${windowLabel} context)`);
+
+      console.log(`  ${chalk.dim('•')} ${paddedName} ${chalk.green(tokenStr)} ${percentStr}`);
+    }
     console.log('');
   } catch (error) {
     writeSpinner.fail('Could not write digest');
