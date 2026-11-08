@@ -1,3 +1,5 @@
+<img width="1376" height="768" alt="Image" src="https://github.com/user-attachments/assets/6a9e4eb3-fea8-47b3-9296-e57b4a702c7c" />
+
 # swagger-digest
 
 [![npm version](https://img.shields.io/npm/v/swagger-digest)](https://www.npmjs.com/package/swagger-digest)
