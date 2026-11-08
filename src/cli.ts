@@ -23,6 +23,7 @@ interface CliOptions {
   excludeTag?: string[];
   pathPrefix?: string;
   maxTokens?: string;
+  autoTrim?: boolean;
   stdout?: boolean;
   spec?: string;
 }
@@ -93,6 +94,7 @@ async function main(): Promise<void> {
     .option('--exclude-tag <tag>', 'Drop operations with this tag, repeatable', collectOption, [])
     .option('--path-prefix <prefix>', 'Keep only operations whose path starts with this prefix')
     .option('--max-tokens <n>', 'Trim the digest until the approximate token estimate fits this budget')
+    .option('--no-auto-trim', 'Disable the automatic 250,000-token default cap for digests without --max-tokens')
     .option('--spec <url>', 'Explicit OpenAPI spec URL; overrides discovery from the Swagger UI page')
     .option('--stdout', 'Print the digest to standard output instead of writing a file')
     .addHelpText(
@@ -179,6 +181,7 @@ async function main(): Promise<void> {
     excludeTags: options.excludeTag,
     pathPrefix: options.pathPrefix,
     maxTokens: parseMaxTokens(options.maxTokens),
+    autoTrim: options.autoTrim !== false,
     onWarning: (message) => console.error(chalk.yellow(`Warning: ${message}`)),
   });
   spinner.succeed(`Parsed ${title} (${result.retrievalMethod})`);

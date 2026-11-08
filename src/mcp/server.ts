@@ -49,6 +49,12 @@ export function createMcpServer(options: DigestServerOptions = {}): McpServer {
           .describe(
             'Trim the digest until an approximate token estimate fits this budget (heuristic, not tokenizer-accurate)',
           ),
+        auto_trim: z
+          .boolean()
+          .optional()
+          .describe(
+            'Auto-trim digests exceeding the 250,000-token default budget when max_tokens is not given. Defaults to true.',
+          ),
         write_to_file: z
           .object({ directory: z.string(), filename: z.string() })
           .optional()

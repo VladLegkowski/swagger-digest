@@ -24,9 +24,25 @@ export interface TransformOptions {
    * budget. The estimator is not tokenizer-accurate; treat the budget as a guide.
    */
   maxTokens?: number;
+  /**
+   * When no explicit `maxTokens` is given, cap the digest at
+   * {@link DEFAULT_MAX_TOKENS} estimated tokens by running the same trim
+   * pipeline, warning when it engages. Defaults to true. Mega-specs
+   * (Kubernetes-class) otherwise produce digests *larger* than the raw spec.
+   */
+  autoTrim?: boolean;
   /** Receives non-fatal notices, e.g. unknown tag names. */
   onWarning?: (message: string) => void;
 }
+
+/**
+ * Default token budget applied when `maxTokens` is undefined and `autoTrim`
+ * is not disabled. Chosen from benchmark data: large real-world specs
+ * (Stripe-class, ~600 operations) digest to ~560k tokens untrimmed, while
+ * kitchen-sink specs expand past their raw size — 250k keeps the largest
+ * useful full-detail digests intact and trims only true outliers.
+ */
+export const DEFAULT_MAX_TOKENS = 250_000;
 
 const HTTP_METHODS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
 
@@ -283,18 +299,29 @@ export function transformOpenApiToMarkdown(
     collapsedTags: new Set(),
     indexOnly: false,
   };
-  if (options.maxTokens === undefined) {
-    return renderDigest(normalizedSpec, sourceUrl, endpoints, tags, fullStage);
-  }
 
   const worst = (markdown: string): number => {
     const report = estimateTokens(markdown);
     return Math.max(...Object.values(report.models).map((model) => model.tokens));
   };
-  const fits = (markdown: string): boolean => worst(markdown) <= options.maxTokens!;
+
+  const effectiveMaxTokens = options.maxTokens ?? (options.autoTrim === false ? undefined : DEFAULT_MAX_TOKENS);
+  if (effectiveMaxTokens === undefined) {
+    return renderDigest(normalizedSpec, sourceUrl, endpoints, tags, fullStage);
+  }
+
+  const fits = (markdown: string): boolean => worst(markdown) <= effectiveMaxTokens;
 
   const full = renderDigest(normalizedSpec, sourceUrl, endpoints, tags, fullStage);
   if (fits(full)) return full;
+
+  if (options.maxTokens === undefined) {
+    options.onWarning?.(
+      `Untrimmed digest ≈ ${worst(full).toLocaleString()} tokens (estimated), over the ` +
+        `${DEFAULT_MAX_TOKENS.toLocaleString()} default budget; auto-trimming. ` +
+        'Pass maxTokens to control the budget or autoTrim: false to disable.',
+    );
+  }
 
   const stages = buildTrimStages(endpoints, tags);
   for (let i = 1; i < stages.length; i += 1) {
@@ -307,7 +334,7 @@ export function transformOpenApiToMarkdown(
           .slice(1, i + 1)
           .map((entry) => entry.action)
           .filter((action): action is string => Boolean(action)),
-        options.maxTokens!,
+        effectiveMaxTokens,
       );
     }
   }
@@ -318,7 +345,7 @@ export function transformOpenApiToMarkdown(
     .slice(1)
     .map((stage) => stage.action)
     .filter((action): action is string => Boolean(action));
-  return appendTrimNote(markdown, allActions, options.maxTokens);
+  return appendTrimNote(markdown, allActions, effectiveMaxTokens);
 }
 
 export { toTypeScriptIdentifier } from './utils.js';

@@ -22,6 +22,11 @@ export interface McpDigestArgs {
   path_prefix?: string;
   /** Trim the digest until the approximate token estimate fits this budget. */
   max_tokens?: number;
+  /**
+   * Auto-trim digests exceeding the 250,000-token default budget when
+   * max_tokens is not given. Defaults to true.
+   */
+  auto_trim?: boolean;
   /** Save the digest to a file instead of returning it inline. */
   write_to_file?: { directory: string; filename: string };
 }
@@ -131,6 +136,7 @@ export async function runSwaggerDigest(
     excludeTags: args.exclude_tags,
     pathPrefix: args.path_prefix,
     maxTokens: args.max_tokens,
+    autoTrim: args.auto_trim !== false,
     onWarning: warn,
   });
 

@@ -91,6 +91,37 @@ By default the digest is returned directly in the tool result (so it lands in th
 - **No headless-browser fallback:** the optional Playwright fallback is disabled in the MCP server.
 - Diagnostics go to stderr only; stdout carries protocol frames exclusively.
 
+## Benchmarks
+
+Ten public APIs, digest vs. raw spec JSON in an LLM context, ground truth from the parsed raw specs. Run in November 2026 against swagger-digest 0.2.0; token counts are heuristic estimates, not tokenizer-exact.
+
+**7/10 wins · 100% operation coverage on every digest produced · 1.6–3.7× lighter · 1 call vs 1–5**
+
+| Spec                | Ops   | Raw tokens             | Digest tokens           | Compression | Op coverage | Winner  |
+| ------------------- | ----- | ---------------------- | ----------------------- | ----------- | ----------- | ------- |
+| Petstore v2         | 20    | 3,461                  | 2,202                   | 1.6×        | 20/20       | 🟢 MCP  |
+| Petstore v3         | 19    | 4,277                  | 2,624                   | 1.6×        | 19/19       | 🟢 MCP  |
+| Petstore v3 UI page | 19    | 4,277 (+4 URL guesses) | ❌ failed*              | —           | —           | 🟡 Raw* |
+| Azure Compute       | 157   | 157,568                | 72,549                  | 2.2×        | 157/157     | 🟢 MCP  |
+| X/Twitter v2        | 259   | 333,985                | 105,719                 | 3.2×        | 259/259     | 🟢 MCP  |
+| Box                 | 297   | 453,200                | 162,829                 | 2.8×        | 297/297     | 🟢 MCP  |
+| Twilio              | 197   | 469,913                | 155,709                 | 3.0×        | 197/197     | 🟢 MCP  |
+| Stripe              | 612   | 2,079,211              | 564,308                 | 3.7×        | 612/612     | 🟢 MCP  |
+| Kubernetes          | 1,172 | 1,085,939              | 1,341,885 (expanded!)   | ❌ 0.8×*    | 1172/1172   | 🔴 Raw  |
+| GitHub (full)       | 1,272 | 3,551,639              | ❌ failed (14 MB fetch) | —           | —           | 🟡 Raw* |
+
+> For its target use case — understanding an API in an LLM context — the digest wins on the spec class that actually matters (up to ~600 operations): 100% endpoint coverage, never truncated, one call, and 1.6–3.7× lighter. The bigger the spec, the bigger the win.
+
+\* Raw's three "wins" carry heavy caveats: the Petstore UI-page case needed brute-forced candidate URLs (the digest's discovery has since been fixed for that class of pages); GitHub's 3.55M-token raw spec would truncate in any model's context anyway; and the Kubernetes expansion is now prevented by the default token cap described below.
+
+### Known failure modes (and their mitigations)
+
+| Case                                                         | What happens                                                           | Mitigation                                                                                                                             |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| JS-only Swagger UI pages with dynamically computed spec URLs | Literal extraction finds nothing after `url:`                          | **Fixed in 0.3.0** (embedded spec-URL scan). Otherwise pass `spec_url` / `--spec` explicitly                                           |
+| Mega-specs (Kubernetes-class, ≥1M tokens)                    | Digest can _expand_ past raw size — descriptions inlined per operation | **Default in 0.3.0**: automatic 250k-token cap (opt out with `--no-auto-trim` / `auto_trim: false`). Explicit `max_tokens` always wins |
+| Huge fetches (14 MB GitHub spec)                             | Fetch fails at the 10 MB response cap                                  | Use a filtered direct spec URL                                                                                                         |
+
 ### Filtering and token budget
 
 Large specs produce large digests. The CLI can remove whole operations before rendering and/or trim the remaining digest to an approximate token budget:
@@ -116,6 +147,8 @@ How `--max-tokens` trims (in this fixed order, re-checked against the estimate a
 
 A `## Trimmed` note at the end of the digest records exactly which steps were applied. After every step, schemas that became unreachable (referenced only by collapsed/removed operations) are dropped from the Data types section. The token estimator is a heuristic, **not** a real tokenizer — treat `--max-tokens` as a guide, not a guarantee. Unknown tag names passed to `--include-tag`/`--exclude-tag` produce a warning on stderr listing the tags that exist in the spec.
 
+**Default token cap:** without an explicit `--max-tokens`, digests are automatically trimmed to an estimated 250,000 tokens (a warning names the untrimmed estimate). Mega-specs can otherwise expand _past_ their raw size once descriptions are inlined per operation. Opt out with `--no-auto-trim`; an explicit `--max-tokens` always takes precedence. The MCP server behaves the same via its `auto_trim` argument (default true).
+
 The same options are available programmatically via the third argument of `transformOpenApiToMarkdown(spec, sourceUrl, { includeTags, excludeTags, pathPrefix, maxTokens, onWarning })`.
 
 ## What it extracts
@@ -123,7 +156,7 @@ The same options are available programmatically via the third argument of `trans
 The retrieval strategy deliberately avoids scraping rendered operation accordions or simulating UI clicks:
 
 1. Fetch and parse a direct `.json`, `.yaml`, or `.yml` URL.
-2. Fetch the Swagger UI page and inspect script configuration for `url: "..."` or an inline `spec: { ... }` object.
+2. Fetch the Swagger UI page and inspect script configuration for `url: "..."` or an inline `spec: { ... }` object, plus any spec-like URLs embedded in same-origin initializer scripts (covers initializers that compute the spec URL dynamically).
 3. Try common spec endpoints on the same origin: `/v3/api-docs`, `/swagger/v1/swagger.json`, `/swagger.json`, `/openapi.json`, and `/api-docs`.
 4. Optionally launch a headless Chromium browser and read the parsed specification from Swagger UI's in-memory state.
 

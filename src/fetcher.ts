@@ -130,6 +130,57 @@ export function extractSpecUrlsFromScripts(scripts: string[], pageUrl: URL): str
 }
 
 /**
+ * Scans script text for absolute URLs that look like OpenAPI/Swagger spec
+ * documents — a fallback for initializers that compute the spec URL
+ * dynamically instead of passing a literal to `url:`. The petstore3 class of
+ * deployments builds its URL from a `host=URL` map at runtime:
+ *
+ * ```js
+ * const ossServices = `petstore3.swagger.io=https://petstore3.swagger.io/api/v3/openapi.json,…`;
+ * window.ui = SwaggerUIBundle({ url: definitionURL });
+ * ```
+ *
+ * Candidates are capped, deduplicated, and ordered same-origin first (stable
+ * within each group), so a page's own spec is probed before third-party URLs
+ * that merely appear in the same script. The URL match set excludes `,` and
+ * `=` so comma/equals-joined host maps split into individual URLs; a genuine
+ * spec URL containing either is rare and simply fails to resolve.
+ */
+export function extractEmbeddedSpecUrlsFromScripts(scripts: string[], pageUrl: URL): string[] {
+  const found: string[] = [];
+  const push = (raw: string): void => {
+    try {
+      const url = new URL(raw);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+      if (!/\.(?:json|ya?ml)$/i.test(url.pathname)) return;
+      if (!/(?:openapi|swagger|api[-._]?docs)/i.test(url.pathname)) return;
+      const resolved = url.toString();
+      if (!found.includes(resolved)) found.push(resolved);
+    } catch {
+      // Not a parseable absolute URL; skip.
+    }
+  };
+
+  for (const script of scripts) {
+    for (const match of script.matchAll(/https?:\/\/[^\s"'`<>(){}[\]\\,=]+/gi)) {
+      push(match[0]);
+    }
+  }
+
+  const sameOrigin = found.filter((url) => {
+    try {
+      return new URL(url).origin === pageUrl.origin;
+    } catch {
+      return false;
+    }
+  });
+  const crossOrigin = found.filter((url) => !sameOrigin.includes(url));
+  return [...sameOrigin, ...crossOrigin].slice(0, MAX_EMBEDDED_SPEC_URLS);
+}
+
+const MAX_EMBEDDED_SPEC_URLS = 8;
+
+/**
  * Finds the array literal following `key:` in a script, tolerating JS comments
  * and string escapes. Returns the raw `[...]` text or undefined.
  */
@@ -290,6 +341,7 @@ async function fetchExternalConfigScripts(
       scripts.push(response.text);
       if (
         extractSpecUrlFromScripts(scripts, pageUrl) ||
+        extractEmbeddedSpecUrlsFromScripts(scripts, pageUrl).length > 0 ||
         scripts.some((script) => findObjectLiteralAfterKey(script, 'spec'))
       ) {
         break;
@@ -670,6 +722,18 @@ export async function fetchOpenApiSpec(input: string, options: FetchOptions = {}
     const externalUrls = extractSpecUrls(externalScripts, pageUrl).filter((url) => !inlineUrls.includes(url));
     const fromExternal = await probeSpecUrls([...inlineUrls, ...externalUrls], ctx, recordFailure, noteMultiple);
     if (fromExternal) return fromExternal;
+
+    // Dynamic initializer configs (url set from a variable, host→URL maps, …)
+    // leave no literal for the extractors above. Probe spec-looking URLs that
+    // appear anywhere in the fetched scripts, same-origin first. No multi-spec
+    // notice here: these are heuristic candidates, not declared definitions.
+    const triedUrls = new Set([...inlineUrls, ...externalUrls]);
+    const embeddedUrls = [
+      ...extractEmbeddedSpecUrlsFromScripts(scripts, pageUrl),
+      ...extractEmbeddedSpecUrlsFromScripts(externalScripts, pageUrl),
+    ].filter((url) => !triedUrls.has(url));
+    const fromEmbedded = await probeSpecUrls(embeddedUrls, ctx, recordFailure);
+    if (fromEmbedded) return fromEmbedded;
 
     for (const script of scripts) {
       const literal = findObjectLiteralAfterKey(script, 'spec');
