@@ -45,6 +45,52 @@ npx swagger-digest --url https://api.example.com/openapi.json --stdout | pbcopy
 
 Run `npx swagger-digest --help` for all CLI options. The package requires Node.js 20 or newer.
 
+## MCP server
+
+The package ships an [MCP](https://modelcontextprotocol.io) server exposing the same pipeline as a tool for AI agents, so they can fetch and digest API docs on their own instead of being handed a Markdown file.
+
+```bash
+npx swagger-digest-mcp
+```
+
+It speaks the stdio transport: the MCP client spawns the process and communicates over stdin/stdout. Register it in your client's configuration:
+
+```json
+{
+  "mcp": {
+    "swagger-digest": {
+      "command": ["npx", "-y", "swagger-digest-mcp"]
+    }
+  }
+}
+```
+
+### The `swagger_digest` tool
+
+| Argument        | Type             | Description                                                                |
+| --------------- | ---------------- | -------------------------------------------------------------------------- |
+| `url`           | string, required | Swagger UI page URL or direct OpenAPI spec URL                             |
+| `spec_url`      | string, optional | Explicit spec URL; overrides discovery from the page                       |
+| `headers`       | object, optional | Request headers (e.g. `Authorization`); sent only to the origin of `url`   |
+| `include_tags`  | string[]         | Keep only operations with these tags                                       |
+| `exclude_tags`  | string[]         | Drop operations with these tags                                            |
+| `path_prefix`   | string           | Keep only paths starting with this prefix                                  |
+| `max_tokens`    | number           | Trim the digest to an approximate token budget                             |
+| `write_to_file` | object, optional | `{ directory, filename }` — save the digest instead of returning it inline |
+
+By default the digest is returned directly in the tool result (so it lands in the agent's context), with a metadata footer: retrieval method, operation/model counts, and a token estimate.
+
+### Environment variables
+
+- `SWAGGER_DIGEST_HEADER` — newline-separated `Name: value` pairs, merged with (and overridden by) the tool call's `headers` argument. Keeps secrets out of the conversation.
+- `SWAGGER_DIGEST_ALLOW_PRIVATE=1` — opt out of the private-network guard (see below).
+
+### Security differences from the CLI
+
+- **SSRF guard on by default:** URLs resolving to loopback, private, or link-local (cloud metadata) addresses are rejected, because MCP clients supply URLs on the model's behalf. Opt out with `SWAGGER_DIGEST_ALLOW_PRIVATE=1` — for example to digest an internal corporate API — only if you trust the hosts involved.
+- **No headless-browser fallback:** the optional Playwright fallback is disabled in the MCP server.
+- Diagnostics go to stderr only; stdout carries protocol frames exclusively.
+
 ### Filtering and token budget
 
 Large specs produce large digests. The CLI can remove whole operations before rendering and/or trim the remaining digest to an approximate token budget:
@@ -179,6 +225,10 @@ src/
   transformer.ts  OpenAPI/Swagger to compact Markdown and TypeScript-like types
   writer.ts       Output path, filename defaults and file writing
   index.ts        Public exports
+  mcp/
+    index.ts      MCP stdio entry point (`swagger-digest-mcp` bin)
+    server.ts     MCP server and tool registration (transport-agnostic)
+    digest.ts     Tool handler: fetch → transform → tool result
 ```
 
 ## Limitations

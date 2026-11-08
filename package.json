@@ -1,6 +1,6 @@
 {
   "name": "swagger-digest",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Turn Swagger UI pages and OpenAPI specs into compact, AI-friendly Markdown API digests.",
   "type": "module",
   "main": "dist/index.js",
@@ -12,7 +12,8 @@
     }
   },
   "bin": {
-    "swagger-digest": "./dist/cli.js"
+    "swagger-digest": "./dist/cli.js",
+    "swagger-digest-mcp": "./dist/mcp/index.js"
   },
   "author": "VladLegkowski <VladLegkowski@users.noreply.github.com>",
   "repository": {
@@ -30,7 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/cli.ts src/mcp/index.ts --format esm --dts --clean",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
@@ -46,11 +47,13 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^7.3.2",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "chalk": "^5.4.1",
     "cheerio": "^1.0.0",
     "commander": "^13.1.0",
     "ora": "^8.2.0",
-    "yaml": "^2.7.0"
+    "yaml": "^2.7.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

@@ -6,14 +6,18 @@ import { createRequire } from 'node:module';
  * build layout is visible instead of silently wrong.
  */
 export function readPackageVersion(moduleUrl: string): string {
-  try {
-    const require = createRequire(moduleUrl);
-    const pkg = require('../package.json') as { version?: unknown };
-    if (typeof pkg?.version === 'string' && pkg.version) return pkg.version;
-    return 'unknown';
-  } catch {
-    return 'unknown';
+  // Bundled entries can land at different depths (dist/cli.js vs dist/mcp/index.js),
+  // so walk up until package.json is found.
+  const require = createRequire(moduleUrl);
+  for (const candidate of ['../package.json', '../../package.json']) {
+    try {
+      const pkg = require(candidate) as { version?: unknown };
+      if (typeof pkg?.version === 'string' && pkg.version) return pkg.version;
+    } catch {
+      // Try the next parent directory.
+    }
   }
+  return 'unknown';
 }
 
 export const VERSION: string = readPackageVersion(import.meta.url);
