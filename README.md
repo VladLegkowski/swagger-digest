@@ -304,9 +304,40 @@ Security model — enforced server-side, not by client approval:
 
 - `SWAGGER_DIGEST_API_BASE_URL` — the single trusted API origin (required; without it the tool explains how to configure itself).
 - `SWAGGER_DIGEST_API_HEADER` — newline-separated `Name: value` authentication headers (same format as `SWAGGER_DIGEST_HEADER`).
+- `SWAGGER_DIGEST_API_HEADER_FILE` — path to a file with the same `Name: value` format, **read at call time**. Wins over the inline env var. This is the recommended way to run with short-lived tokens: an external refresher script rewrites the file and the next call picks it up — no MCP restart. Example refresher for a Keycloak client-credentials flow (launchd/cron):
+
+  ```bash
+  #!/bin/zsh
+  TOKEN=$(curl -s "$ISSUER/protocol/openid-connect/token" \
+    -d grant_type=client_credentials -d client_id="$CLIENT_ID" -d client_secret="$CLIENT_SECRET" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+  printf 'Authorization: Bearer %s\nX-Tenant-Id: LaLiga\n' "$TOKEN" > ~/.config/swagger-digest/api-headers
+  chmod 600 ~/.config/swagger-digest/api-headers
+  ```
+
 - `SWAGGER_DIGEST_API_METHODS` — comma-separated enabled methods; default `get`.
 - `SWAGGER_DIGEST_API_TIMEOUT_MS` — request timeout (default 15000, hard max 60000).
 - `SWAGGER_DIGEST_API_MAX_BYTES` — request/response body cap in bytes (default 1048576).
+
+### OAuth login for `api_call` (`swagger-digest login`)
+
+For APIs behind interactive SSO (e.g. Keycloak-protected Swagger UIs where "Try It Out" works because the browser holds a session), the CLI can perform the same dance:
+
+```bash
+npx swagger-digest login --issuer https://keycloak.example.com/realms/my-realm --client-id my-client
+```
+
+This opens your browser, completes an OAuth2 Authorization Code + PKCE login against a **localhost callback**, and stores access + refresh tokens in `~/.cache/swagger-digest/` with `0600` permissions. Then configure the MCP server to use them:
+
+```json
+"environment": {
+  "SWAGGER_DIGEST_API_BASE_URL": "https://api.example.com",
+  "SWAGGER_DIGEST_OAUTH_ISSUER": "https://keycloak.example.com/realms/my-realm",
+  "SWAGGER_DIGEST_OAUTH_CLIENT_ID": "my-client"
+}
+```
+
+`api_call` injects `Authorization: Bearer <token>` from the cache and **silently refreshes** on expiry. The MCP server never opens a browser and never runs interactive flows: when no valid token exists it returns an error naming the `login` command instead. Re-login is only needed when the issuer's refresh-token policy expires the session. (For confidential clients add `SWAGGER_DIGEST_OAUTH_CLIENT_SECRET`; for a public PKCE client nothing else is needed.)
 
 MCP environment variables:
 

@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { VERSION } from '../version.js';
 import { runSwaggerDigest, type DigestServerOptions } from './digest.js';
-import { runApiCall, type ApiCallArgs, type ApiCallServerOptions } from './api-call.js';
+import { resolveApiCallConfig, runApiCall, type ApiCallArgs, type ApiCallServerOptions } from './api-call.js';
 
 /** Options for the whole MCP server: shared behavior plus per-tool overrides. */
 export interface SwaggerDigestMcpOptions extends DigestServerOptions {
@@ -11,6 +11,20 @@ export interface SwaggerDigestMcpOptions extends DigestServerOptions {
    * production derives them from SWAGGER_DIGEST_API_* environment variables.
    */
   apiCall?: ApiCallServerOptions;
+}
+
+/**
+ * When api_call is configured (options or environment), digest results get a
+ * hint that live execution is available for that origin and which service
+ * prefix spec paths need. Resolved per call so env-based configuration works.
+ */
+function withApiCallHint(options: SwaggerDigestMcpOptions): DigestServerOptions {
+  const resolved = resolveApiCallConfig(options.apiCall ?? {});
+  if (resolved.error !== undefined || resolved.config === undefined) return options;
+  return {
+    ...options,
+    apiCallHint: { trustedOrigin: resolved.config.baseUrl.origin, methods: [...resolved.config.methods] },
+  };
 }
 
 /**
@@ -71,7 +85,7 @@ export function createMcpServer(options: SwaggerDigestMcpOptions = {}): McpServe
           .describe('Save the digest to a file instead of returning it inline'),
       },
     },
-    (args) => runSwaggerDigest(args, options),
+    (args) => runSwaggerDigest(args, withApiCallHint(options)),
   );
 
   server.registerTool(

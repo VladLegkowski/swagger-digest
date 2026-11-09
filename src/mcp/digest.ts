@@ -1,6 +1,7 @@
 import type { CallToolResult, TextContent } from '@modelcontextprotocol/sdk/types.js';
 import { fetchOpenApiSpec } from '../fetcher.js';
 import type { FetchOptions } from '../types.js';
+import type { JsonObject } from '../types.js';
 import { transformOpenApiToMarkdown } from '../transformer.js';
 import { estimateTokens } from '../tokens.js';
 import { mergeHeaders, parseHeaderPairs } from '../headers.js';
@@ -43,6 +44,12 @@ export interface DigestServerOptions {
    * Users can opt out per deployment with SWAGGER_DIGEST_ALLOW_PRIVATE=1.
    */
   blockPrivateNetworks?: boolean;
+  /**
+   * When present, the api_call tool on this server is configured for the given
+   * trusted origin. The digest result then tells the agent (and user) that live
+   * execution is available and which service prefix spec paths need.
+   */
+  apiCallHint?: { trustedOrigin: string; methods: string[] };
 }
 
 /** Digests whose estimate exceeds this many tokens get a budget hint appended. */
@@ -75,6 +82,64 @@ function countDigestOperations(markdown: string): number {
 
 function countDigestModels(markdown: string): number {
   return (markdown.match(/^export (?:interface|type) \w+/gm) ?? []).length;
+}
+
+/**
+ * Server URLs declared by the spec (OpenAPI 3 `servers`, Swagger 2 `host` +
+ * `basePath`). Used ONLY for display hints — api_call never targets them
+ * implicitly; the trusted origin is configuration.
+ */
+function collectDeclaredServerUrls(spec: JsonObject): string[] {
+  const urls: string[] = [];
+  if (Array.isArray(spec.servers)) {
+    for (const server of spec.servers) {
+      if (server && typeof (server as JsonObject).url === 'string') {
+        urls.push((server as JsonObject).url as string);
+      }
+    }
+  } else if (typeof spec.host === 'string') {
+    const schemes = Array.isArray(spec.schemes)
+      ? (spec.schemes as unknown[]).filter((s: unknown): s is string => typeof s === 'string')
+      : [];
+    const scheme = schemes.includes('https') ? 'https' : (schemes[0] ?? 'https');
+    const basePath = typeof spec.basePath === 'string' ? spec.basePath : '';
+    urls.push(`${scheme}://${spec.host}${basePath}`);
+  }
+  return urls;
+}
+
+/**
+ * Hints shown when the digested spec's declared servers match the api_call
+ * trusted origin: live execution is available, and the spec's declared path
+ * prefix (commonly omitted from spec paths because a gateway adds it) is
+ * surfaced so agents don't 404 at the host root.
+ */
+export function buildApiCallHints(
+  spec: JsonObject,
+  hint: { trustedOrigin: string; methods: string[] } | undefined,
+): string[] {
+  if (hint === undefined) return [];
+  const hints: string[] = [];
+  for (const raw of collectDeclaredServerUrls(spec)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      continue;
+    }
+    if (parsed.origin !== hint.trustedOrigin) continue;
+    if (hints.length === 0) {
+      hints.push(
+        `api_call can execute requests against this origin ${hint.trustedOrigin} (methods: ${[...hint.methods].sort().join(', ')})`,
+      );
+    }
+    if (parsed.pathname && parsed.pathname !== '/') {
+      hints.push(
+        `Spec-declared server path: ${parsed.pathname} — spec paths likely omit it; include this prefix in api_call paths.`,
+      );
+    }
+  }
+  return hints;
 }
 
 /**
@@ -156,6 +221,9 @@ export async function runSwaggerDigest(
     tokens > TOKEN_HINT_THRESHOLD && args.max_tokens === undefined
       ? '\n\n_This digest is large. Consider re-running with max_tokens, include_tags, exclude_tags or path_prefix to fit it into context._'
       : '';
+  const apiCallHints = buildApiCallHints(fetchResult.spec, options.apiCallHint);
+  const hintBlock =
+    apiCallHints.length > 0 ? `\n\n_api_call hints:_\n${apiCallHints.map((h) => `- ${h}`).join('\n')}` : '';
 
   if (args.write_to_file) {
     try {
@@ -164,12 +232,14 @@ export async function runSwaggerDigest(
         directory: args.write_to_file.directory,
         filename: args.write_to_file.filename,
       });
-      return { content: textContent(`Digest written to ${outputPath}\n\n_${metadata}_${warningBlock}`) };
+      return { content: textContent(`Digest written to ${outputPath}\n\n_${metadata}_${warningBlock}${hintBlock}`) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return asError(`Could not write digest: ${message}`);
     }
   }
 
-  return { content: textContent(`${markdown}\n\n---\n_Digest metadata: ${metadata}_${warningBlock}${budgetHint}`) };
+  return {
+    content: textContent(`${markdown}\n\n---\n_Digest metadata: ${metadata}_${warningBlock}${budgetHint}${hintBlock}`),
+  };
 }

@@ -4,12 +4,14 @@ import { input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import ora from 'ora';
+import { spawn } from 'node:child_process';
 import { fetchOpenApiSpec } from './fetcher.js';
 import { transformOpenApiToMarkdown } from './transformer.js';
 import { estimateTokens } from './tokens.js';
 import { VERSION } from './version.js';
 import { mergeHeaders, parseHeaderArgument, parseHeaderPairs } from './headers.js';
 import { defaultFilename, defaultOutputDirectory, writeDigest } from './writer.js';
+import { normalizeIssuer, runInteractiveLogin } from './mcp/oauth.js';
 
 interface CliOptions {
   url?: string;
@@ -62,6 +64,47 @@ function parseMaxTokens(value: string | undefined): number | undefined {
 
 function collectOption(value: string, previous: string[]): string[] {
   return [...(previous ?? []), value];
+}
+
+/** Opens a URL in the default browser; failures are non-fatal (URL is printed to stderr). */
+function openBrowser(url: string): void {
+  try {
+    if (process.platform === 'darwin') {
+      spawn('open', [url], { stdio: 'ignore', detached: true }).unref();
+    } else if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', detached: true }).unref();
+    } else {
+      spawn('xdg-open', [url], { stdio: 'ignore', detached: true }).unref();
+    }
+  } catch {
+    // The URL is printed anyway, so the user can open it manually.
+  }
+}
+
+async function runLogin(options: {
+  issuer: string;
+  clientId: string;
+  scope?: string;
+  clientSecret?: string;
+}): Promise<void> {
+  const issuer = normalizeIssuer(options.issuer);
+  if (!/^https?:\/\//.test(issuer)) {
+    throw new Error(
+      `Invalid --issuer "${options.issuer}": use an http:// or https:// URL, e.g. https://host/realms/my-realm`,
+    );
+  }
+  const spinner = ora({ text: 'Starting login…', color: 'cyan' }).start();
+  try {
+    const { cacheFile } = await runInteractiveLogin(
+      { issuer, clientId: options.clientId, clientSecret: options.clientSecret, scope: options.scope },
+      { openUrl: openBrowser, log: (message) => (spinner.text = message) },
+    );
+    spinner.succeed(`Tokens saved to ${chalk.green(cacheFile)}`);
+    console.log(chalk.dim('api_call will use them automatically (silent refresh on expiry).'));
+  } catch (error) {
+    spinner.fail('Login failed');
+    throw error;
+  }
 }
 
 function buildRequestHeaders(options: CliOptions): Record<string, string> {
@@ -126,122 +169,147 @@ async function main(): Promise<void> {
       ].join('\n'),
     );
 
-  program.parse(process.argv);
-  const options = program.opts<CliOptions>();
-
-  if (!options.url && !isInteractive()) {
-    throw new Error('An interactive terminal or --url is required. Run `swagger-digest --help` for usage.');
-  }
-
-  const url =
-    options.url ??
-    (await input({
-      message: 'Swagger UI or OpenAPI spec URL',
-      validate: validateUrl,
-    }));
-  const validUrl = validateUrl(url);
-  if (validUrl !== true) throw new Error(validUrl);
-
-  if (options.stdout && (options.outDir !== undefined || options.filename !== undefined)) {
-    throw new Error(
-      '--stdout cannot be combined with --out-dir or --filename: it prints the digest to standard output instead of writing a file. Drop --stdout, or remove --out-dir/--filename.',
+  program
+    .command('login')
+    .description(
+      'Obtain OAuth2 tokens for the api_call MCP tool via a browser login (PKCE). The MCP server never opens a browser; it only refreshes tokens silently from the cache.',
+    )
+    .requiredOption('--issuer <url>', 'OIDC issuer base URL, e.g. https://keycloak.example.com/realms/my-realm')
+    .requiredOption('--client-id <id>', 'OAuth client id (a public PKCE client needs no secret)')
+    .option('--client-secret <secret>', 'Client secret, only for confidential clients')
+    .option('--scope <scope>', 'OAuth scope(s) to request (default: openid)')
+    .action((options: { issuer: string; clientId: string; clientSecret?: string; scope?: string }) =>
+      runLogin({
+        issuer: options.issuer,
+        clientId: options.clientId,
+        clientSecret: options.clientSecret,
+        scope: options.scope,
+      }),
     );
-  }
 
-  const outputDirectory =
-    options.outDir ??
-    (isInteractive() && !options.stdout
-      ? await input({
-          message: 'Destination directory',
-          default: defaultOutputDirectory(),
-          validate: (value) => (value.trim() ? true : 'Enter a destination directory.'),
-        })
-      : defaultOutputDirectory());
+  // With subcommands registered, commander requires an explicit program action
+  // for the no-subcommand invocation (the original digest flow).
+  program.action(async () => {
+    const options = program.opts<CliOptions>();
 
-  const maxBytes = parseMaxBytes(options.maxBytes);
-  const requestHeaders = buildRequestHeaders(options);
-  const spinner = ora({ text: 'Fetching and parsing OpenAPI definition…', color: 'cyan' }).start();
-  let result;
-  try {
-    result = await fetchOpenApiSpec(url, {
-      useBrowserFallback: options.browser !== false,
-      maxBytes,
-      headers: requestHeaders,
-      specUrl: options.spec,
-      warn: (message) => console.error(chalk.yellow(`Warning: ${message}`)),
+    if (!options.url && !isInteractive()) {
+      throw new Error('An interactive terminal or --url is required. Run `swagger-digest --help` for usage.');
+    }
+
+    const url =
+      options.url ??
+      (await input({
+        message: 'Swagger UI or OpenAPI spec URL',
+        validate: validateUrl,
+      }));
+    const validUrl = validateUrl(url);
+    if (validUrl !== true) throw new Error(validUrl);
+
+    if (options.stdout && (options.outDir !== undefined || options.filename !== undefined)) {
+      throw new Error(
+        '--stdout cannot be combined with --out-dir or --filename: it prints the digest to standard output instead of writing a file. Drop --stdout, or remove --out-dir/--filename.',
+      );
+    }
+
+    const outputDirectory =
+      options.outDir ??
+      (isInteractive() && !options.stdout
+        ? await input({
+            message: 'Destination directory',
+            default: defaultOutputDirectory(),
+            validate: (value) => (value.trim() ? true : 'Enter a destination directory.'),
+          })
+        : defaultOutputDirectory());
+
+    const maxBytes = parseMaxBytes(options.maxBytes);
+    const requestHeaders = buildRequestHeaders(options);
+    const spinner = ora({ text: 'Fetching and parsing OpenAPI definition…', color: 'cyan' }).start();
+    let result;
+    try {
+      result = await fetchOpenApiSpec(url, {
+        useBrowserFallback: options.browser !== false,
+        maxBytes,
+        headers: requestHeaders,
+        specUrl: options.spec,
+        warn: (message) => console.error(chalk.yellow(`Warning: ${message}`)),
+      });
+    } catch (error) {
+      spinner.fail('Could not extract an OpenAPI definition');
+      throw error;
+    }
+
+    const title = typeof result.spec.info?.title === 'string' ? result.spec.info.title : 'API';
+    const markdown = transformOpenApiToMarkdown(result.spec, result.sourceUrl, {
+      includeTags: options.includeTag,
+      excludeTags: options.excludeTag,
+      pathPrefix: options.pathPrefix,
+      maxTokens: parseMaxTokens(options.maxTokens),
+      autoTrim: options.autoTrim !== false,
+      onWarning: (message) => console.error(chalk.yellow(`Warning: ${message}`)),
     });
-  } catch (error) {
-    spinner.fail('Could not extract an OpenAPI definition');
-    throw error;
-  }
+    spinner.succeed(`Parsed ${title} (${result.retrievalMethod})`);
 
-  const title = typeof result.spec.info?.title === 'string' ? result.spec.info.title : 'API';
-  const markdown = transformOpenApiToMarkdown(result.spec, result.sourceUrl, {
-    includeTags: options.includeTag,
-    excludeTags: options.excludeTag,
-    pathPrefix: options.pathPrefix,
-    maxTokens: parseMaxTokens(options.maxTokens),
-    autoTrim: options.autoTrim !== false,
-    onWarning: (message) => console.error(chalk.yellow(`Warning: ${message}`)),
+    if (options.stdout) {
+      // Exactly one artifact on stdout; progress, warnings and the token report
+      // already go to stderr (ora defaults to stderr), so pipes stay clean.
+      process.stdout.write(markdown);
+      return;
+    }
+
+    const filename =
+      options.filename ??
+      (isInteractive()
+        ? await input({
+            message: 'Output filename',
+            default: defaultFilename(title),
+            validate: (value) => (value.trim() ? true : 'Enter a filename.'),
+          })
+        : defaultFilename(title));
+
+    const writeSpinner = ora({ text: 'Writing Markdown digest…', color: 'cyan' }).start();
+    try {
+      const outputPath = await writeDigest({ markdown, directory: outputDirectory, filename });
+      writeSpinner.succeed(`Saved ${chalk.green(outputPath)}`);
+
+      const report = estimateTokens(markdown);
+      const endpointCount = Object.values(result.spec.paths ?? {}).reduce((count: number, pathItem: unknown) => {
+        if (!pathItem || typeof pathItem !== 'object') return count;
+        const methods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
+        const operations = pathItem as Record<string, unknown>;
+        return count + methods.filter((method) => operations[method] && typeof operations[method] === 'object').length;
+      }, 0);
+      const modelCount = Object.keys(
+        (result.spec.components?.schemas ?? result.spec.definitions ?? {}) as object,
+      ).length;
+
+      console.log('');
+      console.log(chalk.bold('Digest summary:'));
+      console.log(`  ${chalk.dim('•')} Endpoints:       ${chalk.cyan(endpointCount)} operations`);
+      if (modelCount > 0) {
+        console.log(`  ${chalk.dim('•')} Data models:     ${chalk.cyan(modelCount)} schemas`);
+      }
+      console.log(`  ${chalk.dim('•')} Characters:      ${chalk.dim(report.characters.toLocaleString())}`);
+      console.log('');
+      console.log(chalk.bold('Estimated token usage (approximate):'));
+
+      for (const model of Object.values(report.models)) {
+        const windowLabel =
+          model.contextWindow >= 1_000_000 ? `${model.contextWindow / 1_000_000}M` : `${model.contextWindow / 1_000}k`;
+
+        const paddedName = `${model.name}:`.padEnd(30, ' ');
+        const tokenStr = `~${model.tokens.toLocaleString()} tokens`.padEnd(16, ' ');
+        const percentStr = chalk.dim(`(${model.contextPercent}% of ${windowLabel} context)`);
+
+        console.log(`  ${chalk.dim('•')} ${paddedName} ${chalk.green(tokenStr)} ${percentStr}`);
+      }
+      console.log('');
+    } catch (error) {
+      writeSpinner.fail('Could not write digest');
+      throw error;
+    }
   });
-  spinner.succeed(`Parsed ${title} (${result.retrievalMethod})`);
 
-  if (options.stdout) {
-    // Exactly one artifact on stdout; progress, warnings and the token report
-    // already go to stderr (ora defaults to stderr), so pipes stay clean.
-    process.stdout.write(markdown);
-    return;
-  }
-
-  const filename =
-    options.filename ??
-    (isInteractive()
-      ? await input({
-          message: 'Output filename',
-          default: defaultFilename(title),
-          validate: (value) => (value.trim() ? true : 'Enter a filename.'),
-        })
-      : defaultFilename(title));
-
-  const writeSpinner = ora({ text: 'Writing Markdown digest…', color: 'cyan' }).start();
-  try {
-    const outputPath = await writeDigest({ markdown, directory: outputDirectory, filename });
-    writeSpinner.succeed(`Saved ${chalk.green(outputPath)}`);
-
-    const report = estimateTokens(markdown);
-    const endpointCount = Object.values(result.spec.paths ?? {}).reduce((count: number, pathItem: unknown) => {
-      if (!pathItem || typeof pathItem !== 'object') return count;
-      const methods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
-      const operations = pathItem as Record<string, unknown>;
-      return count + methods.filter((method) => operations[method] && typeof operations[method] === 'object').length;
-    }, 0);
-    const modelCount = Object.keys((result.spec.components?.schemas ?? result.spec.definitions ?? {}) as object).length;
-
-    console.log('');
-    console.log(chalk.bold('Digest summary:'));
-    console.log(`  ${chalk.dim('•')} Endpoints:       ${chalk.cyan(endpointCount)} operations`);
-    if (modelCount > 0) {
-      console.log(`  ${chalk.dim('•')} Data models:     ${chalk.cyan(modelCount)} schemas`);
-    }
-    console.log(`  ${chalk.dim('•')} Characters:      ${chalk.dim(report.characters.toLocaleString())}`);
-    console.log('');
-    console.log(chalk.bold('Estimated token usage (approximate):'));
-
-    for (const model of Object.values(report.models)) {
-      const windowLabel =
-        model.contextWindow >= 1_000_000 ? `${model.contextWindow / 1_000_000}M` : `${model.contextWindow / 1_000}k`;
-
-      const paddedName = `${model.name}:`.padEnd(30, ' ');
-      const tokenStr = `~${model.tokens.toLocaleString()} tokens`.padEnd(16, ' ');
-      const percentStr = chalk.dim(`(${model.contextPercent}% of ${windowLabel} context)`);
-
-      console.log(`  ${chalk.dim('•')} ${paddedName} ${chalk.green(tokenStr)} ${percentStr}`);
-    }
-    console.log('');
-  } catch (error) {
-    writeSpinner.fail('Could not write digest');
-    throw error;
-  }
+  await program.parseAsync(process.argv);
 }
 
 main().catch((error: unknown) => {

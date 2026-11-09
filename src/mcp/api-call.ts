@@ -1,7 +1,9 @@
 import type { CallToolResult, TextContent } from '@modelcontextprotocol/sdk/types.js';
+import { readFileSync } from 'node:fs';
 import { fetchWithLimits, type HardenedFetchResult } from '../hardened-fetch.js';
 import { estimateTokens } from '../tokens.js';
-import { isSensitiveHeaderName, mergeHeaders, parseHeaderPairs } from '../headers.js';
+import { isSensitiveHeaderName, mergeHeaders, parseHeaderArgument, parseHeaderPairs } from '../headers.js';
+import { resolveAccessToken, resolveOAuthConfig } from './oauth.js';
 
 /**
  * Arguments of the `api_call` MCP tool.
@@ -138,13 +140,44 @@ export function resolveApiCallConfig(
   let authHeaders: Record<string, string> = {};
   if (options.authHeaders !== undefined) {
     authHeaders = options.authHeaders;
-  } else if (env.SWAGGER_DIGEST_API_HEADER !== undefined) {
-    try {
-      authHeaders = parseHeaderPairs(env.SWAGGER_DIGEST_API_HEADER);
-    } catch (error) {
-      return {
-        error: `Invalid SWAGGER_DIGEST_API_HEADER: ${error instanceof Error ? error.message : String(error)}`,
-      };
+  } else {
+    // The header file is read at call time so an external refresher script can
+    // rotate credentials (e.g. short-lived Keycloak tokens) without restarting
+    // the MCP server. A configured file wins over the inline env var: it is the
+    // fresher source by construction.
+    const headerFile = env.SWAGGER_DIGEST_API_HEADER_FILE?.trim();
+    if (headerFile) {
+      let raw: string;
+      try {
+        raw = readFileSync(headerFile, 'utf8');
+      } catch (readError) {
+        return {
+          error:
+            `Could not read SWAGGER_DIGEST_API_HEADER_FILE "${headerFile}": ` +
+            `${readError instanceof Error ? readError.message : String(readError)}`,
+        };
+      }
+      const lines = raw.split(/\r?\n/);
+      for (let index = 0; index < lines.length; index += 1) {
+        if (!lines[index]?.trim()) continue;
+        try {
+          Object.assign(authHeaders, parseHeaderArgument(lines[index] as string));
+        } catch (parseError) {
+          return {
+            error:
+              `Invalid SWAGGER_DIGEST_API_HEADER_FILE "${headerFile}" line ${index + 1}: ` +
+              `${parseError instanceof Error ? parseError.message : String(parseError)}`,
+          };
+        }
+      }
+    } else if (env.SWAGGER_DIGEST_API_HEADER !== undefined) {
+      try {
+        authHeaders = parseHeaderPairs(env.SWAGGER_DIGEST_API_HEADER);
+      } catch (error) {
+        return {
+          error: `Invalid SWAGGER_DIGEST_API_HEADER: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
     }
   }
 
@@ -207,8 +240,12 @@ export function redactSecrets(text: string, secrets: string[]): string {
  * to see. Only transport-level failures (network, blocked host, timeout) and
  * policy violations (disabled method, foreign origin) become isError results.
  */
-export async function runApiCall(args: ApiCallArgs, options: ApiCallServerOptions = {}): Promise<CallToolResult> {
-  const { config, error } = resolveApiCallConfig(options);
+export async function runApiCall(
+  args: ApiCallArgs,
+  options: ApiCallServerOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CallToolResult> {
+  const { config, error } = resolveApiCallConfig(options, env);
   if (error !== undefined || config === undefined) return asError(error ?? 'api_call configuration error.');
 
   if (args.max_tokens !== undefined && (!Number.isInteger(args.max_tokens) || args.max_tokens <= 0)) {
@@ -292,11 +329,28 @@ export async function runApiCall(args: ApiCallArgs, options: ApiCallServerOption
     if (isSensitiveHeaderName(name)) {
       return asError(
         `Refusing to send "${name}" from tool arguments: authentication headers are injected ` +
-          'server-side via SWAGGER_DIGEST_API_HEADER so credentials never enter tool-call transcripts.',
+          'server-side (SWAGGER_DIGEST_API_HEADER / OAuth) so credentials never enter tool-call transcripts.',
       );
     }
   }
-  const requestHeaders = mergeHeaders(config.authHeaders, args.headers);
+
+  // OAuth (when configured) supplies the Authorization header from the on-disk
+  // token cache, silently refreshing when needed. It never opens a browser.
+  const oauthConfig = resolveOAuthConfig(env);
+  let secrets = Object.values(config.authHeaders);
+  let authHeaders = config.authHeaders;
+  if (oauthConfig !== undefined) {
+    const token = await resolveAccessToken(oauthConfig, env);
+    if (token.kind === 'needs-login' || token.kind === 'error') {
+      return asError(token.message);
+    }
+    // OAuth is the fresher auth source; explicit static auth (e.g. X-Tenant-Id)
+    // is preserved on conflicts for non-Authorization names.
+    authHeaders = mergeHeaders({ authorization: `Bearer ${token.accessToken}` }, authHeaders);
+    secrets = [...secrets, ...token.secrets];
+  }
+
+  const requestHeaders = mergeHeaders(authHeaders, args.headers);
   if (bodyText !== undefined) {
     // The serialized body is always JSON; declare it unless the caller did.
     requestHeaders['content-type'] =
@@ -323,8 +377,8 @@ export async function runApiCall(args: ApiCallArgs, options: ApiCallServerOption
     return asError(`api_call failed: ${message}`);
   }
 
-  // Redact configured credentials before anything else touches the body.
-  let responseBody = redactSecrets(result.text, Object.values(config.authHeaders));
+  // Redact configured credentials and OAuth tokens before anything else touches the body.
+  let responseBody = redactSecrets(result.text, secrets);
 
   let wasTrimmed = false;
   if (args.max_tokens !== undefined) {

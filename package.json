@@ -1,6 +1,6 @@
 {
   "name": "swagger-digest",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Turn Swagger UI pages and OpenAPI specs into compact, AI-friendly Markdown API digests.",
   "type": "module",
   "main": "dist/index.js",
