@@ -24,7 +24,7 @@ swagger-digest solves this at two levels: a **digest** (compact, complete, token
 
 ### Option 1: MCP server — recommended for AI coding agents
 
-Run it as an [MCP](https://modelcontextprotocol.io) server and your agent explores APIs on its own: it calls the `swagger_digest` tool with a Swagger UI page or spec URL and receives a compact digest directly in its context — discovery, filtering and token budgets handled for it.
+Run it as an [MCP](https://modelcontextprotocol.io) server and your agent explores APIs on its own: it calls the `swagger_digest` tool with a Swagger UI page or spec URL and receives a compact digest directly in its context — discovery, filtering and token budgets handled for it. Optionally, it can also execute requests against a trusted API with the `api_call` tool (see [Live API execution](#live-api-execution-api_call)).
 
 - **On-demand:** the agent fetches API context only when the task needs it.
 - **Scoped:** filter to specific tags or paths so only relevant operations enter context.
@@ -256,6 +256,57 @@ The `swagger_digest` tool:
 | `max_tokens`    | number           | Trim the digest to an approximate token budget               |
 | `auto_trim`     | boolean          | Default-cap digests without `max_tokens` (default true)      |
 | `write_to_file` | object           | `{ directory, filename }` — save instead of returning inline |
+
+### Live API execution (`api_call`)
+
+Beyond reading documentation, the server can execute requests against **one trusted API origin**, turning the workflow from _read → implement → hope_ into _read → call → inspect → correct_. Non-2xx responses are returned as results (not errors) so error bodies can be inspected, and large response bodies are trimmed to a token budget.
+
+It is inactive until configured. Set the trusted origin when starting the server:
+
+```json
+{
+  "mcpServers": {
+    "swagger-digest": {
+      "command": ["npx", "-y", "swagger-digest-mcp"],
+      "environment": {
+        "SWAGGER_DIGEST_API_BASE_URL": "https://staging.example.com",
+        "SWAGGER_DIGEST_API_HEADER": "Authorization: Bearer sk-…",
+        "SWAGGER_DIGEST_API_METHODS": "get"
+      }
+    }
+  }
+}
+```
+
+The `api_call` tool:
+
+| Argument     | Type   | Description                                                       |
+| ------------ | ------ | ----------------------------------------------------------------- |
+| `path`       | string | API path starting with `/`, resolved against the trusted base URL |
+| `url`        | string | Absolute URL; its origin must equal the trusted base URL origin   |
+| `method`     | string | HTTP method (default `get`; writes need explicit opt-in)          |
+| `query`      | object | Query parameters; array values become repeated keys               |
+| `headers`    | object | Extra headers; credential-bearing names are rejected              |
+| `body`       | any    | JSON-serializable body (POST/PUT/PATCH/DELETE only)               |
+| `max_tokens` | number | Trim large response bodies to an approximate token budget         |
+
+Either `path` or `url` is required. Provide one, not both.
+
+Security model — enforced server-side, not by client approval:
+
+- **Single trusted origin.** Requests resolve only against `SWAGGER_DIGEST_API_BASE_URL`. Server URLs declared inside an OpenAPI spec are **never trusted implicitly** — a malicious spec could point at an attacker-controlled host, so absolute `url` arguments must match the configured origin and are refused otherwise.
+- **GET only by default.** Write methods require `SWAGGER_DIGEST_API_METHODS` (e.g. `get,post`); every method name is validated.
+- **Credentials never enter the conversation.** Authentication is injected server-side from `SWAGGER_DIGEST_API_HEADER`; tool arguments containing `authorization`, `cookie`, `x-api-key` and similar are rejected outright. Response bodies are scanned and any echoed credential is redacted.
+- **SSRF guard.** Private/loopback/metadata addresses are rejected per hop, including across redirects (same `SWAGGER_DIGEST_ALLOW_PRIVATE=1` escape hatch as the digest tool, for internal corporate APIs).
+- **Bounded.** Mandatory timeout (default 15 s, hard max 60 s), 1 MB request/response body cap (configurable), token-capped output.
+
+`api_call` environment variables:
+
+- `SWAGGER_DIGEST_API_BASE_URL` — the single trusted API origin (required; without it the tool explains how to configure itself).
+- `SWAGGER_DIGEST_API_HEADER` — newline-separated `Name: value` authentication headers (same format as `SWAGGER_DIGEST_HEADER`).
+- `SWAGGER_DIGEST_API_METHODS` — comma-separated enabled methods; default `get`.
+- `SWAGGER_DIGEST_API_TIMEOUT_MS` — request timeout (default 15000, hard max 60000).
+- `SWAGGER_DIGEST_API_MAX_BYTES` — request/response body cap in bytes (default 1048576).
 
 MCP environment variables:
 

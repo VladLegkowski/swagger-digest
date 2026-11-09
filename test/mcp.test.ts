@@ -78,12 +78,16 @@ function textOf(result: unknown): string {
     .join('\n');
 }
 
-test('lists the swagger_digest tool with a description', async () => {
+test('lists the swagger_digest and api_call tools with descriptions', async () => {
   const client = await connect();
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 1);
-  assert.equal(tools[0]?.name, 'swagger_digest');
-  assert.match(tools[0]?.description ?? '', /OpenAPI/i);
+  assert.equal(tools.length, 2);
+  const names = tools.map((tool) => tool.name).sort();
+  assert.deepEqual(names, ['api_call', 'swagger_digest']);
+  const digest = tools.find((tool) => tool.name === 'swagger_digest');
+  const call = tools.find((tool) => tool.name === 'api_call');
+  assert.match(digest?.description ?? '', /OpenAPI/i);
+  assert.match(call?.description ?? '', /SWAGGER_DIGEST_API_BASE_URL/);
   await client.close();
 });
 

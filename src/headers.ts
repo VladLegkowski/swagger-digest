@@ -61,6 +61,28 @@ export function parseHeaderPairs(raw: string): Record<string, string> {
   return result;
 }
 
+/**
+ * Header names that carry credentials. `api_call` rejects these when they
+ * appear in tool-call arguments: authentication is injected server-side from
+ * SWAGGER_DIGEST_API_HEADER so secrets never enter agent transcripts.
+ */
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'api-key',
+  'apikey',
+  'x-auth-token',
+  'x-access-token',
+  'x-session-token',
+]);
+
+export function isSensitiveHeaderName(name: string): boolean {
+  return SENSITIVE_HEADER_NAMES.has(name.trim().toLowerCase());
+}
+
 /** Later sources win on conflicting header names. */
 export function mergeHeaders(...sources: Array<Record<string, string> | undefined>): Record<string, string> {
   const result: Record<string, string> = {};

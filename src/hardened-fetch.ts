@@ -34,12 +34,28 @@ export interface HardenedFetchOptions {
   allowedHeaderOrigin?: string;
   /** Called when headers were withheld because a hop crossed origins. */
   onCrossOriginHeadersDropped?: (origin: string) => void;
+  /** HTTP method. Default GET. */
+  method?: string;
+  /**
+   * Request body (already serialized). Only sent for methods that carry a
+   * body. On redirects, 301/302/303 replay as bodyless GET; 307/308 replay
+   * method and body unchanged.
+   */
+  body?: string;
+  /**
+   * When false, non-2xx responses are returned as normal results (status +
+   * body) instead of throwing FetchHttpError. Used by `api_call`, where an
+   * error response body (e.g. a 400 validation message) is exactly what the
+   * caller needs to inspect.
+   */
+  throwOnHttpError?: boolean;
 }
 
 export interface HardenedFetchResult {
   text: string;
   contentType: string;
   status: number;
+  statusText: string;
   /** Final URL after redirects. */
   url: string;
 }
@@ -167,6 +183,10 @@ async function follow(
   }
   const requestHeaders: Record<string, string> = sameOrigin ? { ...defaultHeaders, ...userHeaders } : defaultHeaders;
 
+  const method = (options.method ?? 'GET').toUpperCase();
+  const carriesBody =
+    options.body !== undefined && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && method !== 'TRACE';
+
   const controller = new AbortController();
   const timeout = AbortSignal.timeout(options.timeoutMs);
   timeout.addEventListener('abort', () => controller.abort(), { once: true });
@@ -174,9 +194,11 @@ async function follow(
   let response: Response;
   try {
     response = await fetch(target, {
+      method,
       headers: requestHeaders,
       redirect: 'manual',
       signal: controller.signal,
+      ...(carriesBody ? { body: options.body } : {}),
     });
   } catch (error) {
     if (error instanceof FetchError) throw error;
@@ -199,10 +221,14 @@ async function follow(
       // Body is irrelevant for redirects.
     }
     const next = new URL(response.headers.get('location') ?? '', target);
-    return follow(next.toString(), defaultHeaders, userHeaders, options, maxBytes, redirectsLeft - 1);
+    // Mirror fetch semantics: 301/302/303 replay as bodyless GET; 307/308
+    // replay the original method and body.
+    const downgraded = response.status === 301 || response.status === 302 || response.status === 303;
+    const nextOptions = downgraded ? { ...options, method: 'GET', body: undefined } : { ...options };
+    return follow(next.toString(), defaultHeaders, userHeaders, nextOptions, maxBytes, redirectsLeft - 1);
   }
 
-  if (!response.ok) {
+  if (!response.ok && options.throwOnHttpError !== false) {
     await discardBodySafely(response);
     throw new FetchHttpError(`HTTP ${response.status} ${response.statusText} for ${url}`, response.status);
   }
@@ -223,6 +249,7 @@ async function follow(
     text,
     contentType: response.headers.get('content-type') ?? '',
     status: response.status,
+    statusText: response.statusText ?? '',
     url: target.toString(),
   };
 }
